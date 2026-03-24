@@ -157,7 +157,20 @@ veritasor-contracts/
             └── proof_hash_test.rs   # Off-chain proof hash tests
 ```
 
+### Deployment Validation
+
+Before deploying contracts, validate your environment:
+
+```bash
+cargo run --bin deployment-validator -- validate
+```
+
+This checks critical vars: `SOROBAN_RPC_URL`, `STELLAR_SECRET_KEY`, etc.
+
+Create `.env` from `.env.example` for local use.
+
 ### Deploying (Stellar / Soroban CLI)
+
 
 With [Stellar CLI](https://developers.stellar.org/docs/tools/stellar-cli) and a configured network:
 
