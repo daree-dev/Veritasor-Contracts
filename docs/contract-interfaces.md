@@ -520,6 +520,21 @@ Check if an address is a multisig owner.
 **Returns:** `bool` - Whether address is owner
 
 ---
+### Multisig Threshold Rotation
+The Attestation contract now supports dynamic threshold rotation via the multisig proposal system.
+
+#### Functions
+- `get_multisig_threshold(env: Env) -> u32`
+  - Returns the current number of required signatures for multisig actions.
+- `rotate_threshold(env: &Env, new_threshold: u32)` (Internal Logic)
+  - Updates the required threshold. 
+  - **Security:** Validates that `0 < new_threshold <= owners.len()`.
+- `execute_proposal(...)`
+  - Now handles `ProposalAction::ChangeThreshold(u32)`.
+
+#### Security Notes
+- Threshold changes can only be performed through a successfully approved multisig proposal.
+- Logic prevents setting a threshold higher than the current owner count, which would otherwise "brick" the contract.
 
 ### 1.7 Read-Only Query Methods
 

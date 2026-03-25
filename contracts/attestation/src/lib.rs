@@ -1,6 +1,7 @@
 #![no_std]
-use core::cmp::Ordering;
-use soroban_sdk::{contract, contractimpl, contracttype, Address, BytesN, Env, String, Symbol, Vec};
+use soroban_sdk::{
+    contract, contractimpl, contracttype, Address, BytesN, Env, String, Symbol, Vec,
+};
 
 /// Attestor staking client: WASM import for wasm32, crate client for host builds.
 #[cfg(target_arch = "wasm32")]
@@ -12,17 +13,8 @@ mod attestor_staking_import {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-use veritasor_attestor_staking::AttestorStakingContractClient;
-
 #[cfg(target_arch = "wasm32")]
 use attestor_staking_import::AttestorStakingContractClient;
-
-const STATUS_KEY_TAG: u32 = 1;
-const ADMIN_KEY_TAG: (u32,) = (2,);
-const ANOMALY_KEY_TAG: (u32,) = (3,);
-const AUTHORIZED_KEY_TAG: (u32,) = (4,);
-const ANOMALY_SCORE_MAX: u32 = 100;
-const NONCE_CHANNEL_BUSINESS: u32 = 1;
 
 pub const STATUS_ACTIVE: u32 = 0;
 pub const STATUS_REVOKED: u32 = 1;
@@ -34,22 +26,24 @@ pub type AttestationStatusResult = Vec<(String, Option<AttestationData>, Option<
 
 // Feature modules
 pub mod access_control;
+pub mod dispute;
 pub mod dynamic_fees;
 pub mod events;
+pub mod extended_metadata;
 pub mod fees;
 pub mod multisig;
 pub mod rate_limit;
 pub mod registry;
-pub mod dispute;
-pub mod extended_metadata;
 
 pub use access_control::{ROLE_ADMIN, ROLE_ATTESTOR, ROLE_BUSINESS, ROLE_OPERATOR};
+pub use dispute::{
+    Dispute, DisputeOutcome, DisputeResolution, DisputeStatus, DisputeType, OptionalResolution,
+};
 pub use dynamic_fees::{DataKey, FeeConfig};
 pub use fees::FlatFeeConfig;
 pub use multisig::{Proposal, ProposalAction, ProposalStatus};
 pub use rate_limit::RateLimitConfig;
 pub use registry::{BusinessRecord, BusinessStatus};
-pub use dispute::{Dispute, DisputeOutcome, DisputeStatus, DisputeType, OptionalResolution, DisputeResolution};
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -91,9 +85,20 @@ impl AttestationContract {
         dynamic_fees::set_admin(&env, &admin);
     }
 
-    pub fn configure_fees(env: Env, token: Address, collector: Address, base_fee: i128, enabled: bool) {
+    pub fn configure_fees(
+        env: Env,
+        token: Address,
+        collector: Address,
+        base_fee: i128,
+        enabled: bool,
+    ) {
         dynamic_fees::require_admin(&env);
-        let config = FeeConfig { token, collector, base_fee, enabled };
+        let config = FeeConfig {
+            token,
+            collector,
+            base_fee,
+            enabled,
+        };
         dynamic_fees::set_fee_config(&env, &config);
     }
 
@@ -110,6 +115,7 @@ impl AttestationContract {
         access_control::has_role(&env, &account, role)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn submit_attestation(
         env: Env,
         business: Address,
@@ -138,7 +144,7 @@ impl AttestationContract {
             expiry_timestamp,
         );
         env.storage().instance().set(&key, &data);
-        
+
         events::emit_attestation_submitted(
             &env,
             &business,
@@ -152,24 +158,22 @@ impl AttestationContract {
         );
     }
 
-    pub fn get_attestation(
-        env: Env,
-        business: Address,
-        period: String,
-    ) -> Option<AttestationData> {
+    pub fn get_attestation(env: Env, business: Address, period: String) -> Option<AttestationData> {
         let key = DataKey::Attestation(business, period);
         env.storage().instance().get(&key)
     }
 
     pub fn is_expired(env: Env, business: Address, period: String) -> bool {
-        if let Some((_, _, _, _, _, Some(expiry_ts))) = Self::get_attestation(env.clone(), business, period) {
+        if let Some((_, _, _, _, _, Some(expiry_ts))) =
+            Self::get_attestation(env.clone(), business, period)
+        {
             env.ledger().timestamp() >= expiry_ts
         } else {
             false
         }
     }
 
-    pub fn is_revoked(env: Env, business: Address, period: String) -> bool {
+    pub fn is_revoked(_env: Env, _business: Address, _period: String) -> bool {
         false
     }
 
@@ -197,17 +201,21 @@ impl AttestationContract {
     ) {
         access_control::require_admin(&env, &caller);
         let key = DataKey::Attestation(business.clone(), period.clone());
-        let (old_root, ts, old_ver, fee, proof_hash, expiry): AttestationData = env
-            .storage()
-            .instance()
-            .get(&key)
-            .expect("not found");
+        let (_old_root, ts, old_ver, fee, proof_hash, expiry): AttestationData =
+            env.storage().instance().get(&key).expect("not found");
 
         if new_version <= old_ver {
             panic!("version too low");
         }
 
-        let data = (new_merkle_root.clone(), ts, new_version, fee, proof_hash, expiry);
+        let data = (
+            new_merkle_root.clone(),
+            ts,
+            new_version,
+            fee,
+            proof_hash,
+            expiry,
+        );
         env.storage().instance().set(&key, &data);
     }
 
@@ -222,10 +230,14 @@ impl AttestationContract {
     ) {
         business.require_auth();
         let key = MultiPeriodKey::Ranges(business.clone());
-        let mut ranges: Vec<AttestationRange> = env.storage().instance().get(&key).unwrap_or(Vec::new(&env));
+        let mut ranges: Vec<AttestationRange> =
+            env.storage().instance().get(&key).unwrap_or(Vec::new(&env));
 
         for range in ranges.iter() {
-            if !range.revoked && start_period <= range.end_period && end_period >= range.start_period {
+            if !range.revoked
+                && start_period <= range.end_period
+                && end_period >= range.start_period
+            {
                 panic!("overlap");
             }
         }
@@ -267,7 +279,8 @@ impl AttestationContract {
 
     pub fn confirm_key_rotation(env: Env, caller: Address) {
         let old_admin = dynamic_fees::get_admin(&env);
-        let pending = veritasor_common::key_rotation::get_pending_rotation(&env).expect("no pending");
+        let pending =
+            veritasor_common::key_rotation::get_pending_rotation(&env).expect("no pending");
         let new_admin = pending.new_admin;
 
         caller.require_auth();
@@ -307,4 +320,102 @@ impl AttestationContract {
     pub fn get_dispute(env: Env, id: u64) -> Option<Dispute> {
         dispute::get_dispute(&env, id)
     }
+    // --- Multisig Public Interface ---
+
+    pub fn initialize_multisig(env: Env, owners: Vec<Address>, threshold: u32, _nonce: u64) {
+        multisig::initialize_multisig(&env, &owners, threshold);
+    }
+
+    pub fn create_proposal(
+        env: Env,
+        proposer: Address,
+        action: ProposalAction,
+        _nonce: u64,
+    ) -> u64 {
+        multisig::create_proposal(&env, &proposer, action)
+    }
+
+    pub fn approve_proposal(env: Env, approver: Address, id: u64, _nonce: u64) {
+        multisig::approve_proposal(&env, &approver, id);
+    }
+    pub fn reject_proposal(env: Env, rejecter: Address, id: u64, _nonce: u64) {
+        multisig::reject_proposal(&env, &rejecter, id);
+    }
+
+    pub fn pause(env: Env, _caller: Address, _nonce: u64) {
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "paused"), &true);
+    }
+
+    pub fn is_paused(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&Symbol::new(&env, "paused"))
+            .unwrap_or(false)
+    }
+
+    pub fn execute_proposal(env: Env, caller: Address, id: u64, _nonce: u64) {
+        caller.require_auth();
+        // Updated string here:
+        assert!(
+            multisig::is_owner(&env, &caller),
+            "caller is not a multisig owner"
+        );
+
+        let proposal = multisig::get_proposal(&env, id).expect("proposal not found");
+        multisig::mark_executed(&env, id);
+
+        match proposal.action {
+            ProposalAction::ChangeThreshold(val) => multisig::rotate_threshold(&env, val),
+            ProposalAction::Pause => env
+                .storage()
+                .instance()
+                .set(&soroban_sdk::Symbol::new(&env, "paused"), &true),
+            ProposalAction::Unpause => env
+                .storage()
+                .instance()
+                .set(&soroban_sdk::Symbol::new(&env, "paused"), &false),
+            ProposalAction::AddOwner(addr) => {
+                let mut owners = multisig::get_owners(&env);
+                owners.push_back(addr);
+                multisig::set_owners(&env, &owners);
+            }
+            ProposalAction::RemoveOwner(addr) => {
+                let mut owners = multisig::get_owners(&env);
+                let idx = owners.first_index_of(addr).expect("not owner");
+                owners.remove(idx);
+                multisig::set_owners(&env, &owners);
+            }
+            ProposalAction::GrantRole(addr, role) => access_control::grant_role(&env, &addr, role),
+            _ => panic!("Action not implemented"),
+        }
+    }
+
+    pub fn get_multisig_threshold(env: Env) -> u32 {
+        multisig::get_threshold(&env)
+    }
+
+    pub fn get_multisig_owners(env: Env) -> Vec<Address> {
+        multisig::get_owners(&env)
+    }
+
+    pub fn is_multisig_owner(env: Env, address: Address) -> bool {
+        multisig::is_owner(&env, &address)
+    }
+
+    pub fn get_proposal(env: Env, id: u64) -> Option<Proposal> {
+        multisig::get_proposal(&env, id)
+    }
+
+    pub fn get_approval_count(env: Env, id: u64) -> u32 {
+        multisig::get_approval_count(&env, id)
+    }
+
+    pub fn is_proposal_approved(env: Env, id: u64) -> bool {
+        multisig::is_proposal_approved(&env, id)
+    }
 }
+
+#[cfg(test)]
+mod multisig_test;
