@@ -668,7 +668,8 @@ fn test_emergency_rotate_bypasses_cooldown() {
 
         // First rotation (planned)
         propose_rotation(&env, &admin1, &admin2);
-        env.ledger().set_sequence_number(env.ledger().sequence() + 11);
+        env.ledger()
+            .set_sequence_number(env.ledger().sequence() + 11);
         confirm_rotation(&env, &admin2);
 
         // Cooldown is 5. Try emergency rotation immediately.

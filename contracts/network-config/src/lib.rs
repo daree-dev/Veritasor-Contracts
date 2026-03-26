@@ -7,7 +7,7 @@
 
 #![no_std]
 
-use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, String, Vec, Symbol};
+use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, String, Symbol, Vec};
 
 /// Unique identifier for a Stellar network
 pub type NetworkId = u32;
@@ -111,7 +111,8 @@ mod events {
 
     pub fn emit_network_set(env: &Env, network_id: NetworkId, name: &String) {
         const NETWORK_SET: Symbol = symbol_short!("net_set");
-        env.events().publish((NETWORK_SET, network_id), name.clone());
+        env.events()
+            .publish((NETWORK_SET, network_id), name.clone());
     }
 
     pub fn emit_network_active(env: &Env, network_id: NetworkId, active: bool) {
@@ -126,7 +127,8 @@ mod events {
 
     pub fn emit_asset_set(env: &Env, network_id: NetworkId, asset_code: &String) {
         const ASSET_SET: Symbol = symbol_short!("asset");
-        env.events().publish((ASSET_SET, network_id), asset_code.clone());
+        env.events()
+            .publish((ASSET_SET, network_id), asset_code.clone());
     }
 
     pub fn emit_registry(env: &Env, network_id: NetworkId) {
@@ -136,12 +138,14 @@ mod events {
 
     pub fn emit_role_granted(env: &Env, account: &Address, role: u32, granter: &Address) {
         const ROLE_GRANTED: Symbol = symbol_short!("role_g");
-        env.events().publish((ROLE_GRANTED, account.clone()), (role, granter.clone()));
+        env.events()
+            .publish((ROLE_GRANTED, account.clone()), (role, granter.clone()));
     }
 
     pub fn emit_role_revoked(env: &Env, account: &Address, role: u32, revoker: &Address) {
         const ROLE_REVOKED: Symbol = symbol_short!("role_r");
-        env.events().publish((ROLE_REVOKED, account.clone()), (role, revoker.clone()));
+        env.events()
+            .publish((ROLE_REVOKED, account.clone()), (role, revoker.clone()));
     }
 
     pub fn emit_paused(env: &Env, caller: &Address) {
@@ -170,7 +174,11 @@ mod access_control {
     use super::*;
 
     pub fn has_role(env: &Env, account: &Address, role: u32) -> bool {
-        let roles: u32 = env.storage().instance().get(&DataKey::Role(account.clone())).unwrap_or(0);
+        let roles: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::Role(account.clone()))
+            .unwrap_or(0);
         (roles & role) != 0
     }
 
@@ -182,7 +190,11 @@ mod access_control {
 
         if roles == role {
             let holders_key = DataKey::RoleHolders;
-            let mut holders: Vec<Address> = env.storage().instance().get(&holders_key).unwrap_or(Vec::new(env));
+            let mut holders: Vec<Address> = env
+                .storage()
+                .instance()
+                .get(&holders_key)
+                .unwrap_or(Vec::new(env));
             holders.push_back(account.clone());
             env.storage().instance().set(&holders_key, &holders);
         }
@@ -196,7 +208,11 @@ mod access_control {
 
         if roles == 0 {
             let holders_key = DataKey::RoleHolders;
-            let mut holders: Vec<Address> = env.storage().instance().get(&holders_key).unwrap_or(Vec::new(env));
+            let mut holders: Vec<Address> = env
+                .storage()
+                .instance()
+                .get(&holders_key)
+                .unwrap_or(Vec::new(env));
             if let Some(pos) = holders.iter().position(|a| a == *account) {
                 holders.remove(pos as u32);
                 env.storage().instance().set(&holders_key, &holders);
@@ -205,15 +221,24 @@ mod access_control {
     }
 
     pub fn get_roles(env: &Env, account: &Address) -> u32 {
-        env.storage().instance().get(&DataKey::Role(account.clone())).unwrap_or(0)
+        env.storage()
+            .instance()
+            .get(&DataKey::Role(account.clone()))
+            .unwrap_or(0)
     }
 
     pub fn get_role_holders(env: &Env) -> Vec<Address> {
-        env.storage().instance().get(&DataKey::RoleHolders).unwrap_or(Vec::new(env))
+        env.storage()
+            .instance()
+            .get(&DataKey::RoleHolders)
+            .unwrap_or(Vec::new(env))
     }
 
     pub fn require_admin(env: &Env, account: &Address) {
-        assert!(has_role(env, account, ROLE_ADMIN), "caller must have ADMIN role");
+        assert!(
+            has_role(env, account, ROLE_ADMIN),
+            "caller must have ADMIN role"
+        );
         account.require_auth();
     }
 
@@ -236,7 +261,10 @@ mod access_control {
     }
 
     pub fn is_paused(env: &Env) -> bool {
-        env.storage().instance().get(&DataKey::Paused).unwrap_or(false)
+        env.storage()
+            .instance()
+            .get(&DataKey::Paused)
+            .unwrap_or(false)
     }
 
     pub fn set_paused(env: &Env, paused: bool) {
@@ -265,7 +293,10 @@ mod storage {
     }
 
     pub fn get_admin(env: &Env) -> Address {
-        env.storage().instance().get(&DataKey::Admin).expect("admin not set")
+        env.storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("admin not set")
     }
 
     pub fn set_governance_dao(env: &Env, dao: &Address) {
@@ -277,13 +308,25 @@ mod storage {
     }
 
     pub fn set_network_config(env: &Env, network_id: NetworkId, config: &NetworkConfig) {
-        env.storage().instance().set(&DataKey::NetworkConfig(network_id), config);
-        
-        let version: u32 = env.storage().instance().get(&DataKey::NetworkVersion(network_id)).unwrap_or(0);
-        env.storage().instance().set(&DataKey::NetworkVersion(network_id), &(version + 1));
-        
+        env.storage()
+            .instance()
+            .set(&DataKey::NetworkConfig(network_id), config);
+
+        let version: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::NetworkVersion(network_id))
+            .unwrap_or(0);
+        env.storage()
+            .instance()
+            .set(&DataKey::NetworkVersion(network_id), &(version + 1));
+
         let networks_key = DataKey::RegisteredNetworks;
-        let mut networks: Vec<NetworkId> = env.storage().instance().get(&networks_key).unwrap_or(Vec::new(env));
+        let mut networks: Vec<NetworkId> = env
+            .storage()
+            .instance()
+            .get(&networks_key)
+            .unwrap_or(Vec::new(env));
         if !networks.contains(&network_id) {
             networks.push_back(network_id);
             env.storage().instance().set(&networks_key, &networks);
@@ -291,15 +334,22 @@ mod storage {
     }
 
     pub fn get_network_config(env: &Env, network_id: NetworkId) -> Option<NetworkConfig> {
-        env.storage().instance().get(&DataKey::NetworkConfig(network_id))
+        env.storage()
+            .instance()
+            .get(&DataKey::NetworkConfig(network_id))
     }
 
     pub fn get_registered_networks(env: &Env) -> Vec<NetworkId> {
-        env.storage().instance().get(&DataKey::RegisteredNetworks).unwrap_or(Vec::new(env))
+        env.storage()
+            .instance()
+            .get(&DataKey::RegisteredNetworks)
+            .unwrap_or(Vec::new(env))
     }
 
     pub fn set_default_network(env: &Env, network_id: NetworkId) {
-        env.storage().instance().set(&DataKey::DefaultNetwork, &network_id);
+        env.storage()
+            .instance()
+            .set(&DataKey::DefaultNetwork, &network_id);
     }
 
     pub fn get_default_network(env: &Env) -> Option<NetworkId> {
@@ -307,18 +357,30 @@ mod storage {
     }
 
     pub fn get_network_version(env: &Env, network_id: NetworkId) -> u32 {
-        env.storage().instance().get(&DataKey::NetworkVersion(network_id)).unwrap_or(0)
+        env.storage()
+            .instance()
+            .get(&DataKey::NetworkVersion(network_id))
+            .unwrap_or(0)
     }
 
     pub fn increment_global_version(env: &Env) -> u32 {
-        let version: u32 = env.storage().instance().get(&DataKey::GlobalVersion).unwrap_or(0);
+        let version: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::GlobalVersion)
+            .unwrap_or(0);
         let new_version = version + 1;
-        env.storage().instance().set(&DataKey::GlobalVersion, &new_version);
+        env.storage()
+            .instance()
+            .set(&DataKey::GlobalVersion, &new_version);
         new_version
     }
 
     pub fn get_global_version(env: &Env) -> u32 {
-        env.storage().instance().get(&DataKey::GlobalVersion).unwrap_or(0)
+        env.storage()
+            .instance()
+            .get(&DataKey::GlobalVersion)
+            .unwrap_or(0)
     }
 
     pub fn add_asset(env: &Env, network_id: NetworkId, asset_config: &AssetConfig) {
@@ -326,10 +388,16 @@ mod storage {
             network_id,
             asset_address: asset_config.asset_address.clone(),
         };
-        env.storage().instance().set(&DataKey::NetworkConfig(asset_key.network_id), asset_config);
-        
+        env.storage()
+            .instance()
+            .set(&DataKey::NetworkConfig(asset_key.network_id), asset_config);
+
         let list_key = DataKey::NetworkVersion(asset_key.network_id);
-        let mut assets: Vec<Address> = env.storage().instance().get(&list_key).unwrap_or(Vec::new(env));
+        let mut assets: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&list_key)
+            .unwrap_or(Vec::new(env));
         if !assets.contains(&asset_config.asset_address) {
             assets.push_back(asset_config.asset_address.clone());
             env.storage().instance().set(&list_key, &assets);
@@ -341,26 +409,41 @@ mod storage {
             network_id,
             asset_address: asset_address.clone(),
         };
-        env.storage().instance().remove(&DataKey::NetworkConfig(asset_key.network_id));
-        
+        env.storage()
+            .instance()
+            .remove(&DataKey::NetworkConfig(asset_key.network_id));
+
         let list_key = DataKey::NetworkVersion(network_id);
-        let mut assets: Vec<Address> = env.storage().instance().get(&list_key).unwrap_or(Vec::new(env));
+        let mut assets: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&list_key)
+            .unwrap_or(Vec::new(env));
         if let Some(pos) = assets.iter().position(|a| a == *asset_address) {
             assets.remove(pos as u32);
             env.storage().instance().set(&list_key, &assets);
         }
     }
 
-    pub fn get_asset_config(env: &Env, network_id: NetworkId, asset_address: &Address) -> Option<AssetConfig> {
+    pub fn get_asset_config(
+        env: &Env,
+        network_id: NetworkId,
+        asset_address: &Address,
+    ) -> Option<AssetConfig> {
         let asset_key = AssetKey {
             network_id,
             asset_address: asset_address.clone(),
         };
-        env.storage().instance().get(&DataKey::NetworkConfig(asset_key.network_id))
+        env.storage()
+            .instance()
+            .get(&DataKey::NetworkConfig(asset_key.network_id))
     }
 
     pub fn get_network_assets(env: &Env, network_id: NetworkId) -> Vec<Address> {
-        env.storage().instance().get(&DataKey::NetworkVersion(network_id)).unwrap_or(Vec::new(env))
+        env.storage()
+            .instance()
+            .get(&DataKey::NetworkVersion(network_id))
+            .unwrap_or(Vec::new(env))
     }
 }
 
@@ -370,34 +453,46 @@ mod validation {
 
     pub fn validate_network_config(_env: &Env, config: &NetworkConfig) {
         assert!(!config.name.is_empty(), "network name cannot be empty");
-        assert!(!config.network_passphrase.is_empty(), "network passphrase cannot be empty");
-        
-        assert!(config.fee_policy.base_fee >= 0, "base fee must be non-negative");
-        assert!(config.fee_policy.min_fee >= 0, "min fee must be non-negative");
-        assert!(config.fee_policy.max_fee >= 0, "max fee must be non-negative");
-        
+        assert!(
+            !config.network_passphrase.is_empty(),
+            "network passphrase cannot be empty"
+        );
+
+        assert!(
+            config.fee_policy.base_fee >= 0,
+            "base fee must be non-negative"
+        );
+        assert!(
+            config.fee_policy.min_fee >= 0,
+            "min fee must be non-negative"
+        );
+        assert!(
+            config.fee_policy.max_fee >= 0,
+            "max fee must be non-negative"
+        );
+
         if config.fee_policy.max_fee > 0 {
             assert!(
                 config.fee_policy.max_fee >= config.fee_policy.min_fee,
                 "max fee must be >= min fee"
             );
         }
-        
+
         assert!(
             config.block_time_seconds > 0 && config.block_time_seconds <= 3600,
             "block time must be between 1 and 3600 seconds"
         );
-        
+
         assert!(
             config.dispute_timeout_seconds >= 3600,
             "dispute timeout must be at least 1 hour"
         );
-        
+
         assert!(
             config.max_period_length_seconds >= 86400,
             "max period length must be at least 1 day"
         );
-        
+
         assert!(
             config.min_attestations_for_aggregate > 0,
             "min attestations for aggregate must be > 0"
@@ -413,7 +508,7 @@ mod validation {
         assert!(policy.base_fee >= 0, "base fee must be non-negative");
         assert!(policy.min_fee >= 0, "min fee must be non-negative");
         assert!(policy.max_fee >= 0, "max fee must be non-negative");
-        
+
         if policy.max_fee > 0 {
             assert!(
                 policy.max_fee >= policy.min_fee,
@@ -434,18 +529,18 @@ impl NetworkConfigContract {
             panic!("already initialized");
         }
         admin.require_auth();
-        
+
         storage::set_initialized(&env);
         storage::set_admin(&env, &admin);
         access_control::grant_role(&env, &admin, ROLE_ADMIN);
-        
+
         if let Some(dao) = governance_dao.clone() {
             storage::set_governance_dao(&env, &dao);
             access_control::grant_role(&env, &dao, ROLE_GOVERNANCE);
         }
-        
+
         storage::set_default_network(&env, 0);
-        
+
         events::emit_initialized(&env, &admin);
         if let Some(dao) = governance_dao {
             events::emit_dao_set(&env, &dao);
@@ -460,15 +555,16 @@ impl NetworkConfigContract {
 
     pub fn revoke_role(env: Env, caller: Address, account: Address, role: u32) {
         access_control::require_admin(&env, &caller);
-        
+
         if account == caller && role == ROLE_ADMIN {
             let holders = access_control::get_role_holders(&env);
-            let admin_count = holders.iter().filter(|h| {
-                access_control::has_role(&env, &h, ROLE_ADMIN)
-            }).count();
+            let admin_count = holders
+                .iter()
+                .filter(|h| access_control::has_role(&env, &h, ROLE_ADMIN))
+                .count();
             assert!(admin_count > 1, "cannot revoke last admin role");
         }
-        
+
         access_control::revoke_role(&env, &account, role);
         events::emit_role_revoked(&env, &account, role, &caller);
     }
@@ -487,11 +583,11 @@ impl NetworkConfigContract {
 
     pub fn set_governance_dao(env: Env, caller: Address, dao: Address) {
         access_control::require_admin(&env, &caller);
-        
+
         if let Some(old_dao) = storage::get_governance_dao(&env) {
             access_control::revoke_role(&env, &old_dao, ROLE_GOVERNANCE);
         }
-        
+
         storage::set_governance_dao(&env, &dao);
         access_control::grant_role(&env, &dao, ROLE_GOVERNANCE);
         events::emit_dao_set(&env, &dao);
@@ -517,138 +613,167 @@ impl NetworkConfigContract {
         access_control::is_paused(&env)
     }
 
-    pub fn set_network_config(env: Env, caller: Address, network_id: NetworkId, config: NetworkConfig) {
+    pub fn set_network_config(
+        env: Env,
+        caller: Address,
+        network_id: NetworkId,
+        config: NetworkConfig,
+    ) {
         access_control::require_governance(&env, &caller);
         access_control::require_not_paused(&env);
-        
+
         assert!(network_id != 0, "network_id cannot be 0");
-        
+
         validation::validate_network_config(&env, &config);
-        
+
         storage::set_network_config(&env, network_id, &config);
         storage::increment_global_version(&env);
-        
+
         events::emit_network_set(&env, network_id, &config.name);
     }
 
-    pub fn update_fee_policy(env: Env, caller: Address, network_id: NetworkId, fee_policy: FeePolicy) {
+    pub fn update_fee_policy(
+        env: Env,
+        caller: Address,
+        network_id: NetworkId,
+        fee_policy: FeePolicy,
+    ) {
         access_control::require_governance(&env, &caller);
         access_control::require_not_paused(&env);
-        
+
         validation::validate_fee_policy(&fee_policy);
-        
-        let mut config = storage::get_network_config(&env, network_id)
-            .expect("network config not found");
-        
+
+        let mut config =
+            storage::get_network_config(&env, network_id).expect("network config not found");
+
         config.fee_policy = fee_policy.clone();
         config.updated_at = env.ledger().timestamp();
-        
+
         storage::set_network_config(&env, network_id, &config);
         storage::increment_global_version(&env);
-        
+
         events::emit_fee_policy(&env, network_id, fee_policy.enabled);
     }
 
-    pub fn set_asset_config(env: Env, caller: Address, network_id: NetworkId, asset_config: AssetConfig) {
+    pub fn set_asset_config(
+        env: Env,
+        caller: Address,
+        network_id: NetworkId,
+        asset_config: AssetConfig,
+    ) {
         access_control::require_governance(&env, &caller);
         access_control::require_not_paused(&env);
-        
+
         validation::validate_asset_config(&env, &asset_config);
-        
+
         storage::add_asset(&env, network_id, &asset_config);
         storage::increment_global_version(&env);
-        
+
         events::emit_asset_set(&env, network_id, &asset_config.asset_code);
     }
 
     pub fn remove_asset(env: Env, caller: Address, network_id: NetworkId, asset_address: Address) {
         access_control::require_governance(&env, &caller);
         access_control::require_not_paused(&env);
-        
+
         assert!(
             storage::get_asset_config(&env, network_id, &asset_address).is_some(),
             "asset not found"
         );
-        
+
         storage::remove_asset(&env, network_id, &asset_address);
         storage::increment_global_version(&env);
-        
+
         events::emit_asset_set(&env, network_id, &String::from_str(&env, "REMOVED"));
     }
 
-    pub fn update_contract_registry(env: Env, caller: Address, network_id: NetworkId, contracts: ContractRegistry) {
+    pub fn update_contract_registry(
+        env: Env,
+        caller: Address,
+        network_id: NetworkId,
+        contracts: ContractRegistry,
+    ) {
         access_control::require_governance(&env, &caller);
         access_control::require_not_paused(&env);
-        
-        let mut config = storage::get_network_config(&env, network_id)
-            .expect("network config not found");
-        
+
+        let mut config =
+            storage::get_network_config(&env, network_id).expect("network config not found");
+
         config.contracts = contracts;
         config.updated_at = env.ledger().timestamp();
-        
+
         storage::set_network_config(&env, network_id, &config);
         storage::increment_global_version(&env);
-        
+
         events::emit_registry(&env, network_id);
     }
 
     pub fn set_network_active(env: Env, caller: Address, network_id: NetworkId, active: bool) {
         access_control::require_governance(&env, &caller);
         access_control::require_not_paused(&env);
-        
-        let mut config = storage::get_network_config(&env, network_id)
-            .expect("network config not found");
-        
+
+        let mut config =
+            storage::get_network_config(&env, network_id).expect("network config not found");
+
         config.is_active = active;
         config.updated_at = env.ledger().timestamp();
-        
+
         storage::set_network_config(&env, network_id, &config);
         storage::increment_global_version(&env);
-        
+
         events::emit_network_active(&env, network_id, active);
     }
 
     pub fn set_default_network(env: Env, caller: Address, network_id: NetworkId) {
         access_control::require_governance(&env, &caller);
         access_control::require_not_paused(&env);
-        
+
         if network_id != 0 {
-            let config = storage::get_network_config(&env, network_id)
-                .expect("network config not found");
+            let config =
+                storage::get_network_config(&env, network_id).expect("network config not found");
             assert!(config.is_active, "cannot set inactive network as default");
         }
-        
+
         storage::set_default_network(&env, network_id);
         storage::increment_global_version(&env);
-        
+
         events::emit_default_network(&env, network_id);
     }
 
     pub fn remove_network(env: Env, caller: Address, network_id: NetworkId) {
         access_control::require_admin(&env, &caller);
         access_control::require_not_paused(&env);
-        
+
         let default = storage::get_default_network(&env).unwrap_or(0);
         assert!(network_id != default, "cannot remove default network");
-        
-        let config = storage::get_network_config(&env, network_id)
-            .expect("network config not found");
-        assert!(!config.is_active, "cannot remove active network; deactivate first");
-        
-        env.storage().instance().remove(&DataKey::NetworkConfig(network_id));
-        
+
+        let config =
+            storage::get_network_config(&env, network_id).expect("network config not found");
+        assert!(
+            !config.is_active,
+            "cannot remove active network; deactivate first"
+        );
+
+        env.storage()
+            .instance()
+            .remove(&DataKey::NetworkConfig(network_id));
+
         let asset_list = storage::get_network_assets(&env, network_id);
         for asset_addr in asset_list.iter() {
             storage::remove_asset(&env, network_id, &asset_addr);
         }
-        
+
         let networks_key = DataKey::RegisteredNetworks;
-        let mut networks: Vec<NetworkId> = env.storage().instance().get(&networks_key).unwrap_or(Vec::new(&env));
+        let mut networks: Vec<NetworkId> = env
+            .storage()
+            .instance()
+            .get(&networks_key)
+            .unwrap_or(Vec::new(&env));
         if let Some(pos) = networks.iter().position(|n| n == network_id) {
             networks.remove(pos as u32);
             env.storage().instance().set(&networks_key, &networks);
         }
-        
+
         storage::increment_global_version(&env);
     }
 
@@ -663,8 +788,7 @@ impl NetworkConfigContract {
     }
 
     pub fn get_fee_policy(env: Env, network_id: NetworkId) -> Option<FeePolicy> {
-        storage::get_network_config(&env, network_id)
-            .map(|c| c.fee_policy)
+        storage::get_network_config(&env, network_id).map(|c| c.fee_policy)
     }
 
     pub fn get_allowed_assets(env: Env, network_id: NetworkId) -> Vec<AssetConfig> {
@@ -678,29 +802,45 @@ impl NetworkConfigContract {
         assets
     }
 
-    pub fn get_asset_config(env: Env, network_id: NetworkId, asset_address: Address) -> Option<AssetConfig> {
+    pub fn get_asset_config(
+        env: Env,
+        network_id: NetworkId,
+        asset_address: Address,
+    ) -> Option<AssetConfig> {
         storage::get_asset_config(&env, network_id, &asset_address)
     }
 
     pub fn get_contract_registry(env: Env, network_id: NetworkId) -> Option<ContractRegistry> {
-        storage::get_network_config(&env, network_id)
-            .map(|c| c.contracts)
+        storage::get_network_config(&env, network_id).map(|c| c.contracts)
     }
 
-    pub fn get_contract_address(env: Env, network_id: NetworkId, contract_name: String) -> Option<Address> {
-        storage::get_network_config(&env, network_id)
-            .and_then(|c| {
-                let name = contract_name.to_string();
-                match name.as_str() {
-                    "attestation" if c.contracts.has_attestation => Some(c.contracts.attestation_contract),
-                    "revenue_stream" if c.contracts.has_revenue_stream => Some(c.contracts.revenue_stream_contract),
-                    "audit_log" if c.contracts.has_audit_log => Some(c.contracts.audit_log_contract),
-                    "aggregated_attestations" if c.contracts.has_aggregated_attestations => Some(c.contracts.aggregated_attestations_contract),
-                    "integration_registry" if c.contracts.has_integration_registry => Some(c.contracts.integration_registry_contract),
-                    "attestation_snapshot" if c.contracts.has_attestation_snapshot => Some(c.contracts.attestation_snapshot_contract),
-                    _ => None,
+    pub fn get_contract_address(
+        env: Env,
+        network_id: NetworkId,
+        contract_name: String,
+    ) -> Option<Address> {
+        storage::get_network_config(&env, network_id).and_then(|c| {
+            let name = contract_name.to_string();
+            match name.as_str() {
+                "attestation" if c.contracts.has_attestation => {
+                    Some(c.contracts.attestation_contract)
                 }
-            })
+                "revenue_stream" if c.contracts.has_revenue_stream => {
+                    Some(c.contracts.revenue_stream_contract)
+                }
+                "audit_log" if c.contracts.has_audit_log => Some(c.contracts.audit_log_contract),
+                "aggregated_attestations" if c.contracts.has_aggregated_attestations => {
+                    Some(c.contracts.aggregated_attestations_contract)
+                }
+                "integration_registry" if c.contracts.has_integration_registry => {
+                    Some(c.contracts.integration_registry_contract)
+                }
+                "attestation_snapshot" if c.contracts.has_attestation_snapshot => {
+                    Some(c.contracts.attestation_snapshot_contract)
+                }
+                _ => None,
+            }
+        })
     }
 
     pub fn get_registered_networks(env: Env) -> Vec<NetworkId> {
@@ -724,13 +864,14 @@ impl NetworkConfigContract {
     }
 
     pub fn get_network_parameters(env: Env, network_id: NetworkId) -> Option<(u32, u64, u64, u32)> {
-        storage::get_network_config(&env, network_id)
-            .map(|c| (
+        storage::get_network_config(&env, network_id).map(|c| {
+            (
                 c.block_time_seconds,
                 c.dispute_timeout_seconds,
                 c.max_period_length_seconds,
                 c.min_attestations_for_aggregate,
-            ))
+            )
+        })
     }
 
     pub fn is_asset_valid_for_attestation(

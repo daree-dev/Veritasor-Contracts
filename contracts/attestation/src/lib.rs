@@ -1,6 +1,8 @@
 #![no_std]
 use core::cmp::Ordering;
-use soroban_sdk::{contract, contractimpl, contracttype, Address, BytesN, Env, String, Symbol, Vec};
+use soroban_sdk::{
+    contract, contractimpl, contracttype, Address, BytesN, Env, String, Symbol, Vec,
+};
 
 /// Attestor staking client: WASM import for wasm32, crate client for host builds.
 #[cfg(target_arch = "wasm32")]
@@ -34,22 +36,24 @@ pub type AttestationStatusResult = Vec<(String, Option<AttestationData>, Option<
 
 // Feature modules
 pub mod access_control;
+pub mod dispute;
 pub mod dynamic_fees;
 pub mod events;
+pub mod extended_metadata;
 pub mod fees;
 pub mod multisig;
 pub mod rate_limit;
 pub mod registry;
-pub mod dispute;
-pub mod extended_metadata;
 
 pub use access_control::{ROLE_ADMIN, ROLE_ATTESTOR, ROLE_BUSINESS, ROLE_OPERATOR};
+pub use dispute::{
+    Dispute, DisputeOutcome, DisputeResolution, DisputeStatus, DisputeType, OptionalResolution,
+};
 pub use dynamic_fees::{DataKey, FeeConfig};
 pub use fees::FlatFeeConfig;
 pub use multisig::{Proposal, ProposalAction, ProposalStatus};
 pub use rate_limit::RateLimitConfig;
 pub use registry::{BusinessRecord, BusinessStatus};
-pub use dispute::{Dispute, DisputeOutcome, DisputeStatus, DisputeType, OptionalResolution, DisputeResolution};
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -91,9 +95,20 @@ impl AttestationContract {
         dynamic_fees::set_admin(&env, &admin);
     }
 
-    pub fn configure_fees(env: Env, token: Address, collector: Address, base_fee: i128, enabled: bool) {
+    pub fn configure_fees(
+        env: Env,
+        token: Address,
+        collector: Address,
+        base_fee: i128,
+        enabled: bool,
+    ) {
         dynamic_fees::require_admin(&env);
-        let config = FeeConfig { token, collector, base_fee, enabled };
+        let config = FeeConfig {
+            token,
+            collector,
+            base_fee,
+            enabled,
+        };
         dynamic_fees::set_fee_config(&env, &config);
     }
 
@@ -138,7 +153,7 @@ impl AttestationContract {
             expiry_timestamp,
         );
         env.storage().instance().set(&key, &data);
-        
+
         events::emit_attestation_submitted(
             &env,
             &business,
@@ -152,17 +167,15 @@ impl AttestationContract {
         );
     }
 
-    pub fn get_attestation(
-        env: Env,
-        business: Address,
-        period: String,
-    ) -> Option<AttestationData> {
+    pub fn get_attestation(env: Env, business: Address, period: String) -> Option<AttestationData> {
         let key = DataKey::Attestation(business, period);
         env.storage().instance().get(&key)
     }
 
     pub fn is_expired(env: Env, business: Address, period: String) -> bool {
-        if let Some((_, _, _, _, _, Some(expiry_ts))) = Self::get_attestation(env.clone(), business, period) {
+        if let Some((_, _, _, _, _, Some(expiry_ts))) =
+            Self::get_attestation(env.clone(), business, period)
+        {
             env.ledger().timestamp() >= expiry_ts
         } else {
             false
@@ -197,17 +210,21 @@ impl AttestationContract {
     ) {
         access_control::require_admin(&env, &caller);
         let key = DataKey::Attestation(business.clone(), period.clone());
-        let (old_root, ts, old_ver, fee, proof_hash, expiry): AttestationData = env
-            .storage()
-            .instance()
-            .get(&key)
-            .expect("not found");
+        let (old_root, ts, old_ver, fee, proof_hash, expiry): AttestationData =
+            env.storage().instance().get(&key).expect("not found");
 
         if new_version <= old_ver {
             panic!("version too low");
         }
 
-        let data = (new_merkle_root.clone(), ts, new_version, fee, proof_hash, expiry);
+        let data = (
+            new_merkle_root.clone(),
+            ts,
+            new_version,
+            fee,
+            proof_hash,
+            expiry,
+        );
         env.storage().instance().set(&key, &data);
     }
 
@@ -222,10 +239,14 @@ impl AttestationContract {
     ) {
         business.require_auth();
         let key = MultiPeriodKey::Ranges(business.clone());
-        let mut ranges: Vec<AttestationRange> = env.storage().instance().get(&key).unwrap_or(Vec::new(&env));
+        let mut ranges: Vec<AttestationRange> =
+            env.storage().instance().get(&key).unwrap_or(Vec::new(&env));
 
         for range in ranges.iter() {
-            if !range.revoked && start_period <= range.end_period && end_period >= range.start_period {
+            if !range.revoked
+                && start_period <= range.end_period
+                && end_period >= range.start_period
+            {
                 panic!("overlap");
             }
         }
@@ -267,7 +288,8 @@ impl AttestationContract {
 
     pub fn confirm_key_rotation(env: Env, caller: Address) {
         let old_admin = dynamic_fees::get_admin(&env);
-        let pending = veritasor_common::key_rotation::get_pending_rotation(&env).expect("no pending");
+        let pending =
+            veritasor_common::key_rotation::get_pending_rotation(&env).expect("no pending");
         let new_admin = pending.new_admin;
 
         caller.require_auth();

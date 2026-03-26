@@ -1,12 +1,13 @@
 #![cfg(test)]
 use super::*;
-use soroban_sdk::{
-    testutils::Address as _,
-    token, Address, Env, String,
-};
+use soroban_sdk::{testutils::Address as _, token, Address, Env, String};
 
 fn create_token_contract<'a>(env: &Env, admin: &Address) -> token::StellarAssetClient<'a> {
-    token::StellarAssetClient::new(env, &env.register_stellar_asset_contract_v2(admin.clone()).address())
+    token::StellarAssetClient::new(
+        env,
+        &env.register_stellar_asset_contract_v2(admin.clone())
+            .address(),
+    )
 }
 
 fn setup_test() -> (Env, Address, Address, Address, Address, Address, Address) {
@@ -18,7 +19,7 @@ fn setup_test() -> (Env, Address, Address, Address, Address, Address, Address) {
     let issuer = Address::generate(&env);
     let owner = Address::generate(&env);
     let token_admin = Address::generate(&env);
-    
+
     let token_client = create_token_contract(&env, &token_admin);
     let token = token_client.address.clone();
 
@@ -27,7 +28,15 @@ fn setup_test() -> (Env, Address, Address, Address, Address, Address, Address) {
 
     let attestation_contract = Address::generate(&env);
 
-    (env, admin, issuer, owner, token, attestation_contract, token_admin)
+    (
+        env,
+        admin,
+        issuer,
+        owner,
+        token,
+        attestation_contract,
+        token_admin,
+    )
 }
 
 #[test]

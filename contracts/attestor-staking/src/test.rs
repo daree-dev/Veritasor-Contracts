@@ -65,7 +65,14 @@ fn test_stake_success() {
     let contract_id = env.register(AttestorStakingContract, ());
     let client = AttestorStakingContractClient::new(&env, &contract_id);
 
-    client.initialize(&admin, &token_id, &treasury, &1000, &dispute_contract, &0u64);
+    client.initialize(
+        &admin,
+        &token_id,
+        &treasury,
+        &1000,
+        &dispute_contract,
+        &0u64,
+    );
     client.stake(&attestor, &5000);
 
     let stake = client.get_stake(&attestor).unwrap();
@@ -89,7 +96,14 @@ fn test_partial_stake_becomes_eligible() {
     let contract_id = env.register(AttestorStakingContract, ());
     let client = AttestorStakingContractClient::new(&env, &contract_id);
 
-    client.initialize(&admin, &token_id, &treasury, &1000, &dispute_contract, &0u64);
+    client.initialize(
+        &admin,
+        &token_id,
+        &treasury,
+        &1000,
+        &dispute_contract,
+        &0u64,
+    );
 
     client.stake(&attestor, &500);
     assert!(!client.is_eligible(&attestor));
@@ -114,7 +128,14 @@ fn test_unstake_success_after_unbonding() {
     let contract_id = env.register(AttestorStakingContract, ());
     let client = AttestorStakingContractClient::new(&env, &contract_id);
 
-    client.initialize(&admin, &token_id, &treasury, &1000, &dispute_contract, &100u64);
+    client.initialize(
+        &admin,
+        &token_id,
+        &treasury,
+        &1000,
+        &dispute_contract,
+        &100u64,
+    );
     client.stake(&attestor, &5000);
 
     let before = token_client.balance(&attestor);
@@ -155,7 +176,14 @@ fn test_request_unstake_locked_funds() {
     let contract_id = env.register(AttestorStakingContract, ());
     let client = AttestorStakingContractClient::new(&env, &contract_id);
 
-    client.initialize(&admin, &token_id, &treasury, &1000, &dispute_contract, &0u64);
+    client.initialize(
+        &admin,
+        &token_id,
+        &treasury,
+        &1000,
+        &dispute_contract,
+        &0u64,
+    );
     client.stake(&attestor, &5000);
 
     env.as_contract(&contract_id, || {

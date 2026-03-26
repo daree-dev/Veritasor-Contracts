@@ -417,7 +417,6 @@ fn test_calculate_pricing_revoked_attestation_stub_behavior() {
     assert_eq!(output.base_apr_bps, 1000); // pricing still runs due to stub
 }
 
-
 #[test]
 fn test_get_pricing_quote() {
     let env = Env::default();

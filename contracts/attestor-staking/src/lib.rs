@@ -125,7 +125,10 @@ impl AttestorStakingContract {
         assert!(amount > 0, "amount must be positive");
 
         let pending_key = DataKey::PendingUnstake(attestor.clone());
-        assert!(!env.storage().instance().has(&pending_key), "pending unstake exists");
+        assert!(
+            !env.storage().instance().has(&pending_key),
+            "pending unstake exists"
+        );
 
         let stake_key = DataKey::Stake(attestor.clone());
         let mut stake: Stake = env

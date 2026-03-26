@@ -162,7 +162,13 @@ fn test_record_with_attestation_required_panics_when_revoked() {
         &None,
         &None,
     );
-    att_client.revoke_attestation(&admin, &business, &period, &String::from_str(&env, "fraud"), &1u64);
+    att_client.revoke_attestation(
+        &admin,
+        &business,
+        &period,
+        &String::from_str(&env, "fraud"),
+        &1u64,
+    );
     snap_client.record_snapshot(&admin, &business, &period, &100_000i128, &0u32, &1u64);
 }
 
