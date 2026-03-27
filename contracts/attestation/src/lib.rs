@@ -89,6 +89,7 @@ impl AttestationContract {
         }
         admin.require_auth();
         dynamic_fees::set_admin(&env, &admin);
+        access_control::grant_role(&env, &admin, ROLE_ADMIN);
     }
 
     pub fn configure_fees(env: Env, token: Address, collector: Address, base_fee: i128, enabled: bool) {
@@ -159,6 +160,30 @@ impl AttestationContract {
     ) -> Option<AttestationData> {
         let key = DataKey::Attestation(business, period);
         env.storage().instance().get(&key)
+    }
+
+    /// Retrieves the optional proof hash for a given attestation.
+    /// Returns `None` if the attestation does not exist or has no proof hash.
+    pub fn get_proof_hash(
+        env: Env,
+        business: Address,
+        period: String,
+    ) -> Option<BytesN<32>> {
+        Self::get_attestation(env, business, period).and_then(|data| data.4)
+    }
+
+    /// Verifies if an attestation exists and its merkle root matches the provided one.
+    pub fn verify_attestation(
+        env: Env,
+        business: Address,
+        period: String,
+        merkle_root: BytesN<32>,
+    ) -> bool {
+        if let Some(data) = Self::get_attestation(env, business, period) {
+            data.0 == merkle_root
+        } else {
+            false
+        }
     }
 
     pub fn is_expired(env: Env, business: Address, period: String) -> bool {
@@ -308,3 +333,6 @@ impl AttestationContract {
         dispute::get_dispute(&env, id)
     }
 }
+
+#[cfg(test)]
+mod proof_hash_test;
