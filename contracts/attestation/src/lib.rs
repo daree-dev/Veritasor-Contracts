@@ -250,12 +250,14 @@ impl AttestationContract {
         timelock_ledgers: u32,
         confirmation_window_ledgers: u32,
         cooldown_ledgers: u32,
+        grace_period_ledgers: u32,
     ) {
         dynamic_fees::require_admin(&env);
         let config = veritasor_common::key_rotation::RotationConfig {
             timelock_ledgers,
             confirmation_window_ledgers,
             cooldown_ledgers,
+            grace_period_ledgers,
         };
         veritasor_common::key_rotation::set_rotation_config(&env, &config);
     }
