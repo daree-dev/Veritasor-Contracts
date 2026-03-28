@@ -239,10 +239,6 @@ fn test_migrate_preserves_expiry() {
         &None,
         &Some(expiry_ts),
     );
-    client.migrate_attestation(&admin, &business, &period, &new_root, &2);
-        &Some(expiry_ts),
-        &0u64,
-    );
     client.migrate_attestation(&admin, &business, &period, &new_root, &2, &1u64);
 
     let result = client.get_attestation(&business, &period);

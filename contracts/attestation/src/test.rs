@@ -348,3 +348,4 @@ fn test_revocation_impact() {
     let result = client.try_submit_multi_period_attestation(&business, &202405, &202407, &root2, &1672531200, &1);
     assert!(result.is_ok(), "Overlapping on a revoked attestation should be allowed");
 }
+}

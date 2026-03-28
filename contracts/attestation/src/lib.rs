@@ -89,6 +89,7 @@ impl AttestationContract {
         }
         admin.require_auth();
         dynamic_fees::set_admin(&env, &admin);
+        access_control::grant_role(&env, &admin, ROLE_ADMIN);
     }
 
     pub fn configure_fees(env: Env, token: Address, collector: Address, base_fee: i128, enabled: bool) {
@@ -308,3 +309,53 @@ impl AttestationContract {
         dispute::get_dispute(&env, id)
     }
 }
+
+
+// Test modules
+// #[cfg(test)]
+// mod test;
+// #[cfg(test)]
+// mod access_control_test;
+// #[cfg(test)]
+// mod anomaly_test;
+// #[cfg(test)]
+// mod attestor_staking_integration_test;
+// #[cfg(test)]
+// mod batch_submission_test;
+// #[cfg(test)]
+// mod dispute_test;
+// #[cfg(test)]
+// mod dynamic_fees_test;
+// #[cfg(test)]
+// mod events_test;
+// #[cfg(test)]
+// mod expiry_test;
+// #[cfg(test)]
+// mod extended_metadata_test;
+// #[cfg(test)]
+// mod fees_test;
+#[cfg(test)]
+#[cfg(test)]
+#[cfg(test)]
+#[cfg(test)]
+mod gas_benchmark_test;
+// #[cfg(test)]
+// mod key_rotation_test;
+// #[cfg(test)]
+// mod multi_period_test;
+// #[cfg(test)]
+// mod multisig_test;
+// #[cfg(test)]
+// mod pause_test;
+// #[cfg(test)]
+// mod proof_hash_test;
+// #[cfg(test)]
+// mod property_test;
+// #[cfg(test)]
+// mod query_pagination_test;
+// #[cfg(test)]
+// mod rate_limit_test;
+// #[cfg(test)]
+// mod registry_test;
+// #[cfg(test)]
+// mod revocation_test;
