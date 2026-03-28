@@ -3,6 +3,7 @@
 members = [
     "contracts/aggregated-attestations",
     "contracts/attestation",
+    "contracts/attestation-registry",
     "contracts/attestation-snapshot",
     "contracts/attestor-staking",
     "contracts/audit-log",

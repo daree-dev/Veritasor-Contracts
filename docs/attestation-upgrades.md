@@ -415,3 +415,11 @@ Potential improvements:
 - [Attestation Contract](./README.md#contract-attestation)
 - [Dynamic Fees](./attestation-dynamic-fees.md)
 - [Soroban Documentation](https://soroban.stellar.org/docs)
+
+## Reorg-Resilience and Assumptions
+
+The Attestation Registry is designed to be resilient against blockchain reorgs and out-of-order transaction executions:
+
+1. **Strict Version Monotonicity**: Replayed upgrade transactions will fail because the new version must strictly be greater than the current version.
+2. **Out-of-Order Execution Safety**: If a higher version upgrade (e.g., v3) executes before a delayed lower version upgrade (e.g., v2) due to a reorg, the delayed transaction will safely revert.
+3. **Rollback Determinism**: Following a rollback, the registry safely accepts new higher-version upgrades based on the restored state.
