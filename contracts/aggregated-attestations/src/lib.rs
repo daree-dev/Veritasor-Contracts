@@ -160,7 +160,23 @@ impl AggregatedAttestationsContract {
             .instance()
             .get(&DataKey::Portfolio(portfolio_id.clone()))
             .unwrap_or_else(|| Vec::new(&env));
-        let business_count = businesses.len();
+
+        let mut unique_businesses = Vec::new(&env);
+        for i in 0..businesses.len() {
+            let business = businesses.get(i).unwrap();
+            let mut seen = false;
+            for j in 0..unique_businesses.len() {
+                if unique_businesses.get(j).unwrap() == business {
+                    seen = true;
+                    break;
+                }
+            }
+            if !seen {
+                unique_businesses.push_back(business);
+            }
+        }
+
+        let business_count = unique_businesses.len();
         if business_count == 0 {
             return AggregatedMetrics {
                 total_trailing_revenue: 0,
@@ -175,8 +191,8 @@ impl AggregatedAttestationsContract {
         let mut total_trailing_revenue: i128 = 0;
         let mut total_anomaly_count: u32 = 0;
         let mut businesses_with_snapshots: u32 = 0;
-        for i in 0..businesses.len() {
-            let business = businesses.get(i).unwrap();
+        for i in 0..unique_businesses.len() {
+            let business = unique_businesses.get(i).unwrap();
             let snapshots: Vec<snapshot_import::SnapshotRecord> =
                 client.get_snapshots_for_business(&business);
             if !snapshots.is_empty() {
