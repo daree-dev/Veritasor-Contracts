@@ -323,6 +323,10 @@ pub fn verify_merkle_proof(
     leaf: &BytesN<32>,
     proof: &SorobanVec<BytesN<32>>,
 ) -> bool {
+    if proof.len() > MAX_TREE_DEPTH {
+        return false;
+    }
+
     let mut computed = leaf.clone();
     for i in 0..proof.len() {
         let sibling = proof.get(i).unwrap();
