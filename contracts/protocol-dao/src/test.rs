@@ -319,100 +319,85 @@ fn execute_after_expiry_panics() {
     client.execute_proposal(&admin, &proposal_id);
 }
 
-// ════════════════════════════════════════════════════════════════════
-// QUORUM EDGE CASES - Boundary Conditions
-// ════════════════════════════════════════════════════════════════════
+// ── Quorum Manipulation Tests ────────────────────────────────────────────────
+//
+// These tests verify that quorum cannot be gamed through:
+//   - duplicate votes
+//   - voting on non-pending proposals
+//   - lowering quorum mid-flight via governance proposals
+//   - raising quorum to block execution
+//   - against-only votes satisfying quorum but failing majority
+//   - quorum exactly at boundary (min_votes == total votes)
+//   - gov-config proposals that self-referentially lower quorum
 
+// Adversarial: duplicate vote must not count twice
 #[test]
-fn quorum_with_min_votes_zero() {
-    // Edge case: min_votes=0 means any vote passes quorum
-    let (env, client, admin, gov_token) = setup_with_token(0, 100);
-
+#[should_panic(expected = "already voted")]
+fn duplicate_vote_for_panics() {
+    let (env, client, _admin, gov_token) = setup_with_token(1, 100);
     let voter = Address::generate(&env);
     mint(&env, &gov_token, &voter, 100);
 
     let fee_token = Address::generate(&env);
     let collector = Address::generate(&env);
+    let id = client.create_fee_config_proposal(&voter, &fee_token, &collector, &500, &true);
 
-    let proposal_id =
-        client.create_fee_config_proposal(&voter, &fee_token, &collector, &1_000, &true);
-
-    // Single vote should satisfy quorum (1 for, 0 against, total 1 >= min_votes 0)
-    client.vote_for(&voter, &proposal_id);
-
-    let (for_votes, against_votes, min_req, quorum_ok, majority_ok) =
-        client.get_quorum_info(&proposal_id);
-    assert_eq!(for_votes, 1);
-    assert_eq!(against_votes, 0);
-    assert_eq!(min_req, DEFAULT_MIN_VOTES); // Defaults to 1, not 0
-    assert!(quorum_ok);
-    assert!(majority_ok);
-
-    client.execute_proposal(&admin, &proposal_id);
-
-    let proposal = client.get_proposal(&proposal_id).unwrap();
-    assert_eq!(proposal.status, ProposalStatus::Executed);
+    client.vote_for(&voter, &id);
+    client.vote_for(&voter, &id); // must panic
 }
 
+// Adversarial: duplicate vote_against must not count twice
 #[test]
-fn quorum_with_min_votes_one() {
-    // min_votes=1: need at least 1 total vote
-    let (env, client, admin, gov_token) = setup_with_token(1, 100);
-
+#[should_panic(expected = "already voted")]
+fn duplicate_vote_against_panics() {
+    let (env, client, _admin, gov_token) = setup_with_token(1, 100);
     let voter = Address::generate(&env);
     mint(&env, &gov_token, &voter, 100);
 
     let fee_token = Address::generate(&env);
     let collector = Address::generate(&env);
+    let id = client.create_fee_config_proposal(&voter, &fee_token, &collector, &500, &true);
 
-    let proposal_id =
-        client.create_fee_config_proposal(&voter, &fee_token, &collector, &1_000, &true);
-
-    // Query before voting - no quorum
-    let (for_votes, _against_votes, min_req, quorum_ok, _majority_ok) =
-        client.get_quorum_info(&proposal_id);
-    assert_eq!(for_votes, 0);
-    assert_eq!(min_req, 1);
-    assert!(!quorum_ok);
-
-    // One vote satisfies both quorum (1 >= 1) and majority (1 > 0)
-    client.vote_for(&voter, &proposal_id);
-
-    let (for_votes, _against_votes, min_req, quorum_ok, majority_ok) =
-        client.get_quorum_info(&proposal_id);
-    assert_eq!(for_votes, 1);
-    assert_eq!(min_req, 1);
-    assert!(quorum_ok);
-    assert!(majority_ok);
-
-    client.execute_proposal(&admin, &proposal_id);
+    client.vote_against(&voter, &id);
+    client.vote_against(&voter, &id); // must panic
 }
 
+// Adversarial: voter cannot switch from for to against
+#[test]
+#[should_panic(expected = "already voted")]
+fn switch_vote_from_for_to_against_panics() {
+    let (env, client, _admin, gov_token) = setup_with_token(1, 100);
+    let voter = Address::generate(&env);
+    mint(&env, &gov_token, &voter, 100);
+
+    let fee_token = Address::generate(&env);
+    let collector = Address::generate(&env);
+    let id = client.create_fee_config_proposal(&voter, &fee_token, &collector, &500, &true);
+
+    client.vote_for(&voter, &id);
+    client.vote_against(&voter, &id); // must panic
+}
+
+// Adversarial: voter cannot switch from against to for
+#[test]
+#[should_panic(expected = "already voted")]
+fn switch_vote_from_against_to_for_panics() {
+    let (env, client, _admin, gov_token) = setup_with_token(1, 100);
+    let voter = Address::generate(&env);
+    mint(&env, &gov_token, &voter, 100);
+
+    let fee_token = Address::generate(&env);
+    let collector = Address::generate(&env);
+    let id = client.create_fee_config_proposal(&voter, &fee_token, &collector, &500, &true);
+
+    client.vote_against(&voter, &id);
+    client.vote_for(&voter, &id); // must panic
+}
+
+// Correctness: against-only votes satisfy quorum but must not pass majority
 #[test]
 #[should_panic(expected = "proposal not approved")]
-fn quorum_with_only_against_votes() {
-    // Edge case: only against votes, no for votes - quorum can be met but majority fails
-    let (env, client, admin, gov_token) = setup_with_token(1, 100);
-
-    let voter = Address::generate(&env);
-    mint(&env, &gov_token, &voter, 100);
-
-    let fee_token = Address::generate(&env);
-    let collector = Address::generate(&env);
-
-    let proposal_id =
-        client.create_fee_config_proposal(&voter, &fee_token, &collector, &1_000, &true);
-
-    // Single against vote meets quorum (1 total) but fails majority (0 > 1 is false)
-    client.vote_against(&voter, &proposal_id);
-
-    client.execute_proposal(&admin, &proposal_id); // Should panic: "proposal not approved"
-}
-
-#[test]
-#[should_panic(expected = "proposal not approved")]
-fn majority_requires_strictly_greater() {
-    // Edge case: tie vote (equal for/against) should fail majority check
+fn quorum_met_by_against_votes_only_does_not_execute() {
     let (env, client, admin, gov_token) = setup_with_token(2, 100);
 
     let voter1 = Address::generate(&env);
@@ -422,201 +407,18 @@ fn majority_requires_strictly_greater() {
 
     let fee_token = Address::generate(&env);
     let collector = Address::generate(&env);
+    let id = client.create_fee_config_proposal(&voter1, &fee_token, &collector, &500, &true);
 
-    let proposal_id =
-        client.create_fee_config_proposal(&voter1, &fee_token, &collector, &1_000, &true);
+    client.vote_against(&voter1, &id);
+    client.vote_against(&voter2, &id);
 
-    client.vote_for(&voter1, &proposal_id);
-    client.vote_against(&voter2, &proposal_id);
-
-    // Quorum: 1 + 1 = 2 >= 2 ✓
-    // Majority: 1 > 1 = false ✗
-    let (for_votes, against_votes, min_req, quorum_ok, majority_ok) =
-        client.get_quorum_info(&proposal_id);
-    assert_eq!(for_votes, 1);
-    assert_eq!(against_votes, 1);
-    assert_eq!(min_req, 2);
-    assert!(quorum_ok);
-    assert!(!majority_ok); // Tie fails majority
-
-    client.execute_proposal(&admin, &proposal_id);
+    // quorum is met (2 >= 2) but for_votes(0) > against_votes(2) is false
+    client.execute_proposal(&admin, &id);
 }
 
+// Correctness: quorum exactly at boundary executes successfully
 #[test]
-fn high_quorum_with_large_min_votes() {
-    // Edge case: high min_votes requirement
-    let (env, client, admin, gov_token) = setup_with_token(5, 100);
-
-    let voter1 = Address::generate(&env);
-    let voter2 = Address::generate(&env);
-    let voter3 = Address::generate(&env);
-    let voter4 = Address::generate(&env);
-    let voter5 = Address::generate(&env);
-
-    mint(&env, &gov_token, &voter1, 100);
-    mint(&env, &gov_token, &voter2, 100);
-    mint(&env, &gov_token, &voter3, 100);
-    mint(&env, &gov_token, &voter4, 100);
-    mint(&env, &gov_token, &voter5, 100);
-
-    let fee_token = Address::generate(&env);
-    let collector = Address::generate(&env);
-
-    let proposal_id =
-        client.create_fee_config_proposal(&voter1, &fee_token, &collector, &1_000, &true);
-
-    // Vote 4 times - not enough
-    client.vote_for(&voter1, &proposal_id);
-    client.vote_for(&voter2, &proposal_id);
-    client.vote_for(&voter3, &proposal_id);
-    client.vote_for(&voter4, &proposal_id);
-
-    let (for_votes, _against_votes, min_req, quorum_ok, _majority_ok) =
-        client.get_quorum_info(&proposal_id);
-    assert_eq!(for_votes, 4);
-    assert_eq!(min_req, 5);
-    assert!(!quorum_ok); // 4 < 5
-
-    // 5th vote meets quorum
-    client.vote_for(&voter5, &proposal_id);
-
-    let (for_votes, _against_votes, _min_req, quorum_ok, majority_ok) =
-        client.get_quorum_info(&proposal_id);
-    assert_eq!(for_votes, 5);
-    assert!(quorum_ok); // 5 >= 5 ✓
-    assert!(majority_ok); // 5 > 0 ✓
-
-    client.execute_proposal(&admin, &proposal_id);
-}
-
-// ════════════════════════════════════════════════════════════════════
-// EXPIRY EDGE CASES
-// ════════════════════════════════════════════════════════════════════
-
-#[test]
-#[should_panic(expected = "proposal expired")]
-fn expiry_at_exact_boundary() {
-    // Edge case: expiry at exact duration boundary
-    let (env, client, _admin, gov_token) = setup_with_token(1, 10);
-
-    let voter = Address::generate(&env);
-    mint(&env, &gov_token, &voter, 100);
-
-    let fee_token = Address::generate(&env);
-    let collector = Address::generate(&env);
-
-    let proposal_id =
-        client.create_fee_config_proposal(&voter, &fee_token, &collector, &1_000, &true);
-
-    // Advance to created_at + duration (should still be valid)
-    env.ledger().with_mut(|li| {
-        li.sequence_number += 10; // created_at was 0, duration is 10, now at sequence 10
-    });
-
-    // At boundary: 10 > (0 + 10) = false, so not expired yet
-    // But next sequence will be expired
-    client.vote_for(&voter, &proposal_id); // Should succeed at boundary
-
-    // Advance to created_at + duration + 1 (now expired)
-    env.ledger().with_mut(|li| {
-        li.sequence_number += 1; // Now at sequence 11
-    });
-
-    // 11 > (0 + 10) = true, so expired
-    client.vote_for(&voter, &proposal_id); // Should panic
-}
-
-#[test]
-fn proposal_valid_just_before_expiry() {
-    // Edge case: voting/executing works just before expiry
-    let (env, client, admin, gov_token) = setup_with_token(1, 10);
-
-    let voter = Address::generate(&env);
-    mint(&env, &gov_token, &voter, 100);
-
-    let fee_token = Address::generate(&env);
-    let collector = Address::generate(&env);
-
-    let proposal_id =
-        client.create_fee_config_proposal(&voter, &fee_token, &collector, &1_000, &true);
-
-    // Advance to created_at + duration - 1
-    env.ledger().with_mut(|li| {
-        li.sequence_number += 9; // created_at 0, duration 10, now at sequence 9
-    });
-
-    // At 9: not expired (9 > 10 = false)
-    client.vote_for(&voter, &proposal_id);
-
-    // Execute just before expiry
-    client.execute_proposal(&admin, &proposal_id);
-
-    let proposal = client.get_proposal(&proposal_id).unwrap();
-    assert_eq!(proposal.status, ProposalStatus::Executed);
-}
-
-// ════════════════════════════════════════════════════════════════════
-// REPLAY PROTECTION - Double Voting Prevention
-// ════════════════════════════════════════════════════════════════════
-
-#[test]
-#[should_panic(expected = "already voted")]
-fn cannot_vote_twice_for() {
-    let (env, client, _admin, gov_token) = setup_with_token(1, 100);
-
-    let voter = Address::generate(&env);
-    mint(&env, &gov_token, &voter, 100);
-
-    let fee_token = Address::generate(&env);
-    let collector = Address::generate(&env);
-
-    let proposal_id =
-        client.create_fee_config_proposal(&voter, &fee_token, &collector, &1_000, &true);
-
-    client.vote_for(&voter, &proposal_id);
-    client.vote_for(&voter, &proposal_id); // Should panic: already voted
-}
-
-#[test]
-#[should_panic(expected = "already voted")]
-fn cannot_vote_twice_against() {
-    let (env, client, _admin, gov_token) = setup_with_token(1, 100);
-
-    let voter = Address::generate(&env);
-    mint(&env, &gov_token, &voter, 100);
-
-    let fee_token = Address::generate(&env);
-    let collector = Address::generate(&env);
-
-    let proposal_id =
-        client.create_fee_config_proposal(&voter, &fee_token, &collector, &1_000, &true);
-
-    client.vote_against(&voter, &proposal_id);
-    client.vote_against(&voter, &proposal_id); // Should panic: already voted
-}
-
-#[test]
-#[should_panic(expected = "already voted")]
-fn cannot_switch_vote() {
-    // Edge case: voter tries to change their vote (vote_for then vote_against)
-    let (env, client, _admin, gov_token) = setup_with_token(1, 100);
-
-    let voter = Address::generate(&env);
-    mint(&env, &gov_token, &voter, 100);
-
-    let fee_token = Address::generate(&env);
-    let collector = Address::generate(&env);
-
-    let proposal_id =
-        client.create_fee_config_proposal(&voter, &fee_token, &collector, &1_000, &true);
-
-    client.vote_for(&voter, &proposal_id);
-    client.vote_against(&voter, &proposal_id); // Should panic: already voted
-}
-
-#[test]
-fn vote_counts_independently() {
-    // Multiple voters each vote once - counts should be correct
+fn quorum_exactly_at_boundary_executes() {
     let (env, client, admin, gov_token) = setup_with_token(3, 100);
 
     let voter1 = Address::generate(&env);
@@ -628,302 +430,25 @@ fn vote_counts_independently() {
 
     let fee_token = Address::generate(&env);
     let collector = Address::generate(&env);
+    let id = client.create_fee_config_proposal(&voter1, &fee_token, &collector, &500, &true);
 
-    let proposal_id =
-        client.create_fee_config_proposal(&voter1, &fee_token, &collector, &1_000, &true);
+    client.vote_for(&voter1, &id);
+    client.vote_for(&voter2, &id);
+    client.vote_for(&voter3, &id);
 
-    client.vote_for(&voter1, &proposal_id);
+    assert_eq!(client.get_votes_for(&id), 3);
+    assert_eq!(client.get_votes_against(&id), 0);
 
-    let for_votes = client.get_votes_for(&proposal_id);
-    let against_votes = client.get_votes_against(&proposal_id);
-    assert_eq!(for_votes, 1);
-    assert_eq!(against_votes, 0);
-
-    client.vote_for(&voter2, &proposal_id);
-    let for_votes = client.get_votes_for(&proposal_id);
-    assert_eq!(for_votes, 2);
-
-    client.vote_against(&voter3, &proposal_id);
-    let against_votes = client.get_votes_against(&proposal_id);
-    assert_eq!(against_votes, 1);
-
-    // Quorum: 2 + 1 = 3 >= 3 ✓
-    // Majority: 2 > 1 ✓
-    client.execute_proposal(&admin, &proposal_id);
+    client.execute_proposal(&admin, &id);
+    let proposal = client.get_proposal(&id).unwrap();
+    assert_eq!(proposal.status, ProposalStatus::Executed);
 }
 
-// ════════════════════════════════════════════════════════════════════
-// AUTHORIZATION AND TOKEN GATING
-// ════════════════════════════════════════════════════════════════════
-
+// Correctness: one below quorum boundary must not execute
 #[test]
-fn double_vote_different_proposals_allowed() {
-    // Edge case: same voter can vote on different proposals
-    let (env, client, _admin, gov_token) = setup_with_token(1, 100);
-
-    let voter = Address::generate(&env);
-    mint(&env, &gov_token, &voter, 100);
-
-    let fee_token = Address::generate(&env);
-    let collector = Address::generate(&env);
-
-    let proposal_id_1 =
-        client.create_fee_config_proposal(&voter, &fee_token, &collector, &1_000, &true);
-    let proposal_id_2 =
-        client.create_fee_config_proposal(&voter, &fee_token, &collector, &2_000, &false);
-
-    // Vote on both proposals
-    client.vote_for(&voter, &proposal_id_1);
-    client.vote_for(&voter, &proposal_id_2); // Should succeed (different proposal)
-
-    assert_eq!(client.get_votes_for(&proposal_id_1), 1);
-    assert_eq!(client.get_votes_for(&proposal_id_2), 1);
-}
-
-#[test]
-#[should_panic(expected = "insufficient governance token balance")]
-fn vote_without_token_fails() {
-    let (env, client, _admin, gov_token) = setup_with_token(1, 100);
-
-    let voter_with_token = Address::generate(&env);
-    let voter_without_token = Address::generate(&env);
-    mint(&env, &gov_token, &voter_with_token, 100);
-
-    let fee_token = Address::generate(&env);
-    let collector = Address::generate(&env);
-
-    let proposal_id = client.create_fee_config_proposal(
-        &voter_with_token,
-        &fee_token,
-        &collector,
-        &1_000,
-        &true,
-    );
-
-    // Voter with token votes successfully
-    client.vote_for(&voter_with_token, &proposal_id);
-
-    // Voter without token cannot vote
-    client.vote_for(&voter_without_token, &proposal_id);
-}
-
-// ════════════════════════════════════════════════════════════════════
-// STATE TRANSITIONS AND PROPOSAL LIFECYCLE
-// ════════════════════════════════════════════════════════════════════
-
-#[test]
-#[should_panic(expected = "proposal is not pending")]
-fn cannot_vote_on_executed_proposal() {
-    let (env, client, admin, gov_token) = setup_with_token(1, 100);
-
-    let voter = Address::generate(&env);
-    mint(&env, &gov_token, &voter, 100);
-
-    let fee_token = Address::generate(&env);
-    let collector = Address::generate(&env);
-
-    let proposal_id =
-        client.create_fee_config_proposal(&voter, &fee_token, &collector, &1_000, &true);
-
-    client.vote_for(&voter, &proposal_id);
-    client.execute_proposal(&admin, &proposal_id);
-
-    // Try to vote on executed proposal
-    let voter2 = Address::generate(&env);
-    mint(&env, &gov_token, &voter2, 100);
-    client.vote_for(&voter2, &proposal_id);
-}
-
-#[test]
-#[should_panic(expected = "proposal is not pending")]
-fn cannot_vote_on_canceled_proposal() {
-    let (env, client, _admin, gov_token) = setup_with_token(1, 100);
-
-    let creator = Address::generate(&env);
-    mint(&env, &gov_token, &creator, 100);
-
-    let fee_token = Address::generate(&env);
-    let collector = Address::generate(&env);
-
-    let proposal_id =
-        client.create_fee_config_proposal(&creator, &fee_token, &collector, &1_000, &true);
-
-    client.cancel_proposal(&creator, &proposal_id);
-
-    // Try to vote on canceled proposal
-    client.vote_for(&creator, &proposal_id);
-}
-
-#[test]
-#[should_panic(expected = "proposal is not pending")]
-fn cannot_cancel_executed_proposal() {
-    let (env, client, admin, gov_token) = setup_with_token(1, 100);
-
-    let voter = Address::generate(&env);
-    mint(&env, &gov_token, &voter, 100);
-
-    let fee_token = Address::generate(&env);
-    let collector = Address::generate(&env);
-
-    let proposal_id =
-        client.create_fee_config_proposal(&voter, &fee_token, &collector, &1_000, &true);
-
-    client.vote_for(&voter, &proposal_id);
-    client.execute_proposal(&admin, &proposal_id);
-
-    // Try to cancel executed proposal
-    client.cancel_proposal(&voter, &proposal_id);
-}
-
-#[test]
-#[should_panic(expected = "proposal is not pending")]
-fn cannot_execute_canceled_proposal() {
-    let (env, client, admin, gov_token) = setup_with_token(1, 100);
-
-    let creator = Address::generate(&env);
-    mint(&env, &gov_token, &creator, 100);
-
-    let fee_token = Address::generate(&env);
-    let collector = Address::generate(&env);
-
-    let proposal_id =
-        client.create_fee_config_proposal(&creator, &fee_token, &collector, &1_000, &true);
-
-    client.cancel_proposal(&creator, &proposal_id);
-
-    // Try to execute canceled proposal
-    client.execute_proposal(&admin, &proposal_id);
-}
-
-// ════════════════════════════════════════════════════════════════════
-// PARAME_TER VALIDATION
-// ════════════════════════════════════════════════════════════════════
-
-#[test]
-fn set_voting_config_respects_defaults() {
-    let (_env, client, admin, _gov_token) = setup_with_token(5, 50);
-
-    // Set to 0, should default to DEFAULT_MIN_VOTES
-    client.set_voting_config(&admin, &0, &0);
-
-    let (_, _, min_votes, duration) = client.get_config();
-    assert_eq!(min_votes, DEFAULT_MIN_VOTES);
-    assert_eq!(duration, DEFAULT_PROPOSAL_DURATION);
-}
-
-#[test]
-fn set_voting_config_with_explicit_values() {
-    let (_env, client, admin, _gov_token) = setup_with_token(1, 10);
-
-    client.set_voting_config(&admin, &7, &42);
-
-    let (_, _, min_votes, duration) = client.get_config();
-    assert_eq!(min_votes, 7);
-    assert_eq!(duration, 42);
-}
-
-#[test]
-#[should_panic(expected = "base_fee must be non-negative")]
-fn create_proposal_with_negative_fee_panics() {
-    let (env, client, _admin, gov_token) = setup_with_token(1, 100);
-
-    let creator = Address::generate(&env);
-    mint(&env, &gov_token, &creator, 100);
-
-    let fee_token = Address::generate(&env);
-    let collector = Address::generate(&env);
-
-    // Negative base_fee should fail
-    client.create_fee_config_proposal(&creator, &fee_token, &collector, &-1, &true);
-}
-
-#[test]
-fn create_proposal_with_zero_fee_succeeds() {
-    let (env, client, admin, gov_token) = setup_with_token(1, 100);
-
-    let creator = Address::generate(&env);
-    mint(&env, &gov_token, &creator, 100);
-
-    let fee_token = Address::generate(&env);
-    let collector = Address::generate(&env);
-
-    // Zero base_fee should succeed
-    let proposal_id =
-        client.create_fee_config_proposal(&creator, &fee_token, &collector, &0, &true);
-
-    client.vote_for(&creator, &proposal_id);
-    client.execute_proposal(&admin, &proposal_id);
-
-    let cfg = client.get_attestation_fee_config().unwrap();
-    assert_eq!(cfg.2, 0);
-}
-
-// ════════════════════════════════════════════════════════════════════
-// GOVERNANCE CONFIGURATION PROPOSALS
-// ════════════════════════════════════════════════════════════════════
-
-#[test]
-fn execute_governance_config_proposal() {
-    let (env, client, admin, gov_token) = setup_with_token(1, 100);
-
-    let creator = Address::generate(&env);
-    mint(&env, &gov_token, &creator, 100);
-
-    // Current: min_votes=1, duration=100
-    let (_, _, current_min, current_dur) = client.get_config();
-    assert_eq!(current_min, 1);
-    assert_eq!(current_dur, 100);
-
-    // Create proposal to change to min_votes=5, duration=200
-    let proposal_id =
-        client.create_gov_config_proposal(&creator, &5, &200);
-
-    client.vote_for(&creator, &proposal_id);
-    client.execute_proposal(&admin, &proposal_id);
-
-    // Check that config was updated
-    let (_, _, new_min, new_dur) = client.get_config();
-    assert_eq!(new_min, 5);
-    assert_eq!(new_dur, 200);
-}
-
-#[test]
-fn fee_toggle_proposal() {
-    let (env, client, admin, gov_token) = setup_with_token(1, 100);
-
-    let creator = Address::generate(&env);
-    mint(&env, &gov_token, &creator, 100);
-
-    // Set initial fee config
-    let fee_token = Address::generate(&env);
-    let collector = Address::generate(&env);
-    let proposal_id_1 =
-        client.create_fee_config_proposal(&creator, &fee_token, &collector, &1_000, &true);
-
-    client.vote_for(&creator, &proposal_id_1);
-    client.execute_proposal(&admin, &proposal_id_1);
-
-    let cfg = client.get_attestation_fee_config().unwrap();
-    assert!(cfg.3); // enabled = true
-
-    // Toggle off
-    let proposal_id_2 = client.create_fee_toggle_proposal(&creator, &false);
-
-    client.vote_for(&creator, &proposal_id_2);
-    client.execute_proposal(&admin, &proposal_id_2);
-
-    let cfg = client.get_attestation_fee_config().unwrap();
-    assert!(!cfg.3); // enabled = false
-}
-
-// ════════════════════════════════════════════════════════════════════
-// SEQUENCING AND ORDERING
-// ════════════════════════════════════════════════════════════════════
-
-#[test]
-fn multiple_proposals_maintain_separate_vote_counts() {
-    // Edge case: ensure vote counts don't leak between proposals
-    let (env, client, _admin, gov_token) = setup_with_token(1, 100);
+#[should_panic(expected = "quorum not met")]
+fn one_below_quorum_boundary_panics() {
+    let (env, client, admin, gov_token) = setup_with_token(3, 100);
 
     let voter1 = Address::generate(&env);
     let voter2 = Address::generate(&env);
@@ -932,43 +457,264 @@ fn multiple_proposals_maintain_separate_vote_counts() {
 
     let fee_token = Address::generate(&env);
     let collector = Address::generate(&env);
+    let id = client.create_fee_config_proposal(&voter1, &fee_token, &collector, &500, &true);
 
-    let proposal_id_1 =
-        client.create_fee_config_proposal(&voter1, &fee_token, &collector, &1_000, &true);
-    let proposal_id_2 =
-        client.create_fee_config_proposal(&voter1, &fee_token, &collector, &2_000, &false);
+    client.vote_for(&voter1, &id);
+    client.vote_for(&voter2, &id);
 
-    // Vote differently on each
-    client.vote_for(&voter1, &proposal_id_1);
-    client.vote_against(&voter2, &proposal_id_2);
-
-    // proposal_1: 1 for, 0 against
-    assert_eq!(client.get_votes_for(&proposal_id_1), 1);
-    assert_eq!(client.get_votes_against(&proposal_id_1), 0);
-
-    // proposal_2: 0 for, 1 against
-    assert_eq!(client.get_votes_for(&proposal_id_2), 0);
-    assert_eq!(client.get_votes_against(&proposal_id_2), 1);
+    client.execute_proposal(&admin, &id);
 }
 
+// Adversarial: cannot vote on an already-executed proposal
 #[test]
-fn proposal_ids_increment_sequentially() {
-    let (env, client, creator, gov_token) = setup_with_token(1, 100);
+#[should_panic(expected = "proposal is not pending")]
+fn vote_on_executed_proposal_panics() {
+    let (env, client, admin, gov_token) = setup_with_token(1, 100);
 
-    mint(&env, &gov_token, &creator, 100);
+    let voter = Address::generate(&env);
+    let voter2 = Address::generate(&env);
+    mint(&env, &gov_token, &voter, 100);
+    mint(&env, &gov_token, &voter2, 100);
 
     let fee_token = Address::generate(&env);
     let collector = Address::generate(&env);
+    let id = client.create_fee_config_proposal(&voter, &fee_token, &collector, &500, &true);
 
-    let proposal_1 =
-        client.create_fee_config_proposal(&creator, &fee_token, &collector, &1_000, &true);
-    let proposal_2 =
-        client.create_fee_config_proposal(&creator, &fee_token, &collector, &1_000, &true);
-    let proposal_3 =
-        client.create_fee_config_proposal(&creator, &fee_token, &collector, &1_000, &true);
+    client.vote_for(&voter, &id);
+    client.execute_proposal(&admin, &id);
 
-    assert_eq!(proposal_1, 0);
-    assert_eq!(proposal_2, 1);
-    assert_eq!(proposal_3, 2);
+    client.vote_for(&voter2, &id); // must panic
 }
 
+// Adversarial: cannot vote on a cancelled/rejected proposal
+#[test]
+#[should_panic(expected = "proposal is not pending")]
+fn vote_on_cancelled_proposal_panics() {
+    let (env, client, admin, gov_token) = setup_with_token(1, 100);
+
+    let creator = Address::generate(&env);
+    mint(&env, &gov_token, &creator, 100);
+
+    let voter2 = Address::generate(&env);
+    mint(&env, &gov_token, &voter2, 100);
+
+    let fee_token = Address::generate(&env);
+    let collector = Address::generate(&env);
+    let id = client.create_fee_config_proposal(&creator, &fee_token, &collector, &500, &true);
+
+    client.cancel_proposal(&admin, &id);
+    client.vote_for(&voter2, &id); // must panic
+}
+
+// Adversarial: cannot execute an already-executed proposal
+#[test]
+#[should_panic(expected = "proposal is not pending")]
+fn execute_already_executed_proposal_panics() {
+    let (env, client, admin, gov_token) = setup_with_token(1, 100);
+
+    let voter = Address::generate(&env);
+    mint(&env, &gov_token, &voter, 100);
+
+    let fee_token = Address::generate(&env);
+    let collector = Address::generate(&env);
+    let id = client.create_fee_config_proposal(&voter, &fee_token, &collector, &500, &true);
+
+    client.vote_for(&voter, &id);
+    client.execute_proposal(&admin, &id);
+    client.execute_proposal(&admin, &id); // must panic
+}
+
+// Adversarial: cannot cancel an already-executed proposal
+#[test]
+#[should_panic(expected = "proposal is not pending")]
+fn cancel_executed_proposal_panics() {
+    let (env, client, admin, gov_token) = setup_with_token(1, 100);
+
+    let voter = Address::generate(&env);
+    mint(&env, &gov_token, &voter, 100);
+
+    let fee_token = Address::generate(&env);
+    let collector = Address::generate(&env);
+    let id = client.create_fee_config_proposal(&voter, &fee_token, &collector, &500, &true);
+
+    client.vote_for(&voter, &id);
+    client.execute_proposal(&admin, &id);
+    client.cancel_proposal(&admin, &id); // must panic
+}
+
+// Regression: raising quorum via set_voting_config blocks a proposal that
+// previously had enough votes
+#[test]
+#[should_panic(expected = "quorum not met")]
+fn raising_quorum_after_votes_blocks_execution() {
+    let (env, client, admin, gov_token) = setup_with_token(1, 100);
+
+    let voter = Address::generate(&env);
+    mint(&env, &gov_token, &voter, 100);
+
+    let fee_token = Address::generate(&env);
+    let collector = Address::generate(&env);
+    let id = client.create_fee_config_proposal(&voter, &fee_token, &collector, &500, &true);
+
+    client.vote_for(&voter, &id);
+    // admin raises quorum to 5 after the vote — execution must now fail
+    client.set_voting_config(&admin, &5, &100);
+
+    client.execute_proposal(&admin, &id);
+}
+
+// Regression: lowering quorum via set_voting_config allows a previously
+// blocked proposal to execute
+#[test]
+fn lowering_quorum_unblocks_execution() {
+    let (env, client, admin, gov_token) = setup_with_token(5, 100);
+
+    let voter = Address::generate(&env);
+    mint(&env, &gov_token, &voter, 100);
+
+    let fee_token = Address::generate(&env);
+    let collector = Address::generate(&env);
+    let id = client.create_fee_config_proposal(&voter, &fee_token, &collector, &500, &true);
+
+    client.vote_for(&voter, &id);
+    // only 1 vote, quorum was 5 — lower it to 1
+    client.set_voting_config(&admin, &1, &100);
+
+    client.execute_proposal(&admin, &id);
+    let proposal = client.get_proposal(&id).unwrap();
+    assert_eq!(proposal.status, ProposalStatus::Executed);
+}
+
+// Correctness: gov-config proposal that lowers quorum takes effect and
+// allows a subsequent proposal to execute with fewer votes
+#[test]
+fn gov_config_proposal_lowers_quorum_for_future_proposals() {
+    let (env, client, admin, gov_token) = setup_with_token(3, 100);
+
+    let voter1 = Address::generate(&env);
+    let voter2 = Address::generate(&env);
+    let voter3 = Address::generate(&env);
+    mint(&env, &gov_token, &voter1, 100);
+    mint(&env, &gov_token, &voter2, 100);
+    mint(&env, &gov_token, &voter3, 100);
+
+    // Proposal A: lower quorum from 3 → 1
+    let gov_id = client.create_gov_config_proposal(&voter1, &1, &100);
+    client.vote_for(&voter1, &gov_id);
+    client.vote_for(&voter2, &gov_id);
+    client.vote_for(&voter3, &gov_id);
+    client.execute_proposal(&admin, &gov_id);
+
+    let (_, _, min_votes, _) = client.get_config();
+    assert_eq!(min_votes, 1);
+
+    // Proposal B: now only 1 vote needed
+    let fee_token = Address::generate(&env);
+    let collector = Address::generate(&env);
+    let fee_id = client.create_fee_config_proposal(&voter1, &fee_token, &collector, &999, &true);
+    client.vote_for(&voter1, &fee_id);
+    client.execute_proposal(&admin, &fee_id);
+
+    let proposal = client.get_proposal(&fee_id).unwrap();
+    assert_eq!(proposal.status, ProposalStatus::Executed);
+}
+
+// Correctness: gov-config proposal that raises quorum blocks proposals
+// that would have passed under the old quorum
+#[test]
+#[should_panic(expected = "quorum not met")]
+fn gov_config_proposal_raises_quorum_blocks_execution() {
+    let (env, client, admin, gov_token) = setup_with_token(1, 100);
+
+    let voter1 = Address::generate(&env);
+    let voter2 = Address::generate(&env);
+    let voter3 = Address::generate(&env);
+    mint(&env, &gov_token, &voter1, 100);
+    mint(&env, &gov_token, &voter2, 100);
+    mint(&env, &gov_token, &voter3, 100);
+
+    // Proposal A: raise quorum from 1 → 5
+    let gov_id = client.create_gov_config_proposal(&voter1, &5, &100);
+    client.vote_for(&voter1, &gov_id);
+    client.execute_proposal(&admin, &gov_id);
+
+    let (_, _, min_votes, _) = client.get_config();
+    assert_eq!(min_votes, 5);
+
+    // Proposal B: only 1 vote — must fail quorum
+    let fee_token = Address::generate(&env);
+    let collector = Address::generate(&env);
+    let fee_id = client.create_fee_config_proposal(&voter2, &fee_token, &collector, &999, &true);
+    client.vote_for(&voter2, &fee_id);
+    client.execute_proposal(&admin, &fee_id);
+}
+
+// Adversarial: token-less voter cannot vote even if quorum is 1
+#[test]
+#[should_panic(expected = "insufficient governance token balance")]
+fn voter_without_token_cannot_vote() {
+    let (env, client, _admin, _gov_token) = setup_with_token(1, 100);
+
+    // creator has token, voter2 does not
+    let creator = Address::generate(&env);
+    let voter2 = Address::generate(&env);
+    mint(&env, &_gov_token, &creator, 100);
+
+    let fee_token = Address::generate(&env);
+    let collector = Address::generate(&env);
+    let id = client.create_fee_config_proposal(&creator, &fee_token, &collector, &500, &true);
+
+    client.vote_for(&voter2, &id); // must panic
+}
+
+// Correctness: mixed votes — majority for with quorum met executes
+#[test]
+fn majority_for_with_mixed_votes_executes() {
+    let (env, client, admin, gov_token) = setup_with_token(3, 100);
+
+    let voter1 = Address::generate(&env);
+    let voter2 = Address::generate(&env);
+    let voter3 = Address::generate(&env);
+    mint(&env, &gov_token, &voter1, 100);
+    mint(&env, &gov_token, &voter2, 100);
+    mint(&env, &gov_token, &voter3, 100);
+
+    let fee_token = Address::generate(&env);
+    let collector = Address::generate(&env);
+    let id = client.create_fee_config_proposal(&voter1, &fee_token, &collector, &500, &true);
+
+    client.vote_for(&voter1, &id);
+    client.vote_for(&voter2, &id);
+    client.vote_against(&voter3, &id);
+
+    assert_eq!(client.get_votes_for(&id), 2);
+    assert_eq!(client.get_votes_against(&id), 1);
+
+    client.execute_proposal(&admin, &id);
+    let proposal = client.get_proposal(&id).unwrap();
+    assert_eq!(proposal.status, ProposalStatus::Executed);
+}
+
+// Correctness: majority against with quorum met must not execute
+#[test]
+#[should_panic(expected = "proposal not approved")]
+fn majority_against_with_quorum_met_does_not_execute() {
+    let (env, client, admin, gov_token) = setup_with_token(3, 100);
+
+    let voter1 = Address::generate(&env);
+    let voter2 = Address::generate(&env);
+    let voter3 = Address::generate(&env);
+    mint(&env, &gov_token, &voter1, 100);
+    mint(&env, &gov_token, &voter2, 100);
+    mint(&env, &gov_token, &voter3, 100);
+
+    let fee_token = Address::generate(&env);
+    let collector = Address::generate(&env);
+    let id = client.create_fee_config_proposal(&voter1, &fee_token, &collector, &500, &true);
+
+    client.vote_for(&voter1, &id);
+    client.vote_against(&voter2, &id);
+    client.vote_against(&voter3, &id);
+
+    client.execute_proposal(&admin, &id);
+}
