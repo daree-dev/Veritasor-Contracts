@@ -39,6 +39,7 @@ fn set_test_config(env: &Env) {
         timelock_ledgers: 10,
         confirmation_window_ledgers: 20,
         cooldown_ledgers: 5,
+        grace_period_ledgers: 10,
     };
     set_rotation_config(env, &config);
 }
@@ -69,6 +70,7 @@ fn test_custom_config() {
             timelock_ledgers: 100,
             confirmation_window_ledgers: 200,
             cooldown_ledgers: 50,
+            grace_period_ledgers: 100,
         };
         set_rotation_config(&env, &custom);
 
@@ -88,6 +90,7 @@ fn test_zero_timelock_rejected() {
             timelock_ledgers: 0,
             confirmation_window_ledgers: 20,
             cooldown_ledgers: 5,
+            grace_period_ledgers: 10,
         };
         set_rotation_config(&env, &config);
     });
@@ -102,6 +105,7 @@ fn test_zero_confirmation_window_rejected() {
             timelock_ledgers: 10,
             confirmation_window_ledgers: 0,
             cooldown_ledgers: 5,
+            grace_period_ledgers: 10,
         };
         set_rotation_config(&env, &config);
     });
@@ -494,6 +498,7 @@ fn test_rotation_history_accumulates() {
             timelock_ledgers: 1,
             confirmation_window_ledgers: 100,
             cooldown_ledgers: 0,
+            grace_period_ledgers: 10,
         };
         set_rotation_config(&env, &config);
 
@@ -517,6 +522,7 @@ fn test_rotation_history_trimmed_at_max() {
             timelock_ledgers: 1,
             confirmation_window_ledgers: 100,
             cooldown_ledgers: 0,
+            grace_period_ledgers: 10,
         };
         set_rotation_config(&env, &config);
 
@@ -654,6 +660,201 @@ fn test_empty_history_initially() {
 }
 
 // ════════════════════════════════════════════════════════════════════
+//  Emergency Recovery & Adversarial Tests
+// ════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_emergency_rotate_bypasses_cooldown() {
+    let (env, cid) = setup();
+    env.as_contract(&cid, || {
+        set_test_config(&env);
+        let admin1 = Address::generate(&env);
+        let admin2 = Address::generate(&env);
+        let admin3 = Address::generate(&env);
+
+        // First rotation (planned)
+        propose_rotation(&env, &admin1, &admin2);
+        env.ledger().set_sequence_number(env.ledger().sequence() + 11);
+        confirm_rotation(&env, &admin2);
+
+        // Cooldown is 5. Try emergency rotation immediately.
+        // It should succeed because emergency_rotate doesn't check cooldown.
+        let result = emergency_rotate(&env, &admin2, &admin3);
+        assert_eq!(result.status, RotationStatus::Completed);
+        assert!(result.is_emergency);
+        assert_eq!(get_rotation_count(&env), 2);
+    });
+}
+
+#[test]
+fn test_emergency_rotate_during_timelock() {
+    let (env, cid) = setup();
+    env.as_contract(&cid, || {
+        set_test_config(&env);
+        let admin1 = Address::generate(&env);
+        let admin2 = Address::generate(&env);
+        let admin3 = Address::generate(&env);
+
+        // Propose planned rotation (timelock 10)
+        propose_rotation(&env, &admin1, &admin2);
+
+        // Advance only 5 ledgers (still in timelock)
+        env.ledger()
+            .set_sequence_number(env.ledger().sequence() + 5);
+
+        // Emergency rotation should work and clear pending
+        let result = emergency_rotate(&env, &admin1, &admin3);
+        assert_eq!(result.status, RotationStatus::Completed);
+        assert!(!has_pending_rotation(&env));
+
+        let history = get_rotation_history(&env);
+        assert_eq!(history.len(), 1);
+        assert_eq!(history.get(0).unwrap().new_admin, admin3);
+    });
+}
+
+#[test]
+fn test_emergency_rotate_during_confirmation_window() {
+    let (env, cid) = setup();
+    env.as_contract(&cid, || {
+        set_test_config(&env);
+        let admin1 = Address::generate(&env);
+        let admin2 = Address::generate(&env);
+        let admin3 = Address::generate(&env);
+
+        // Propose planned rotation (timelock 10, window 20)
+        propose_rotation(&env, &admin1, &admin2);
+
+        // Advance to confirmation window (15 ledgers)
+        env.ledger()
+            .set_sequence_number(env.ledger().sequence() + 15);
+
+        // Emergency rotation should work and clear pending
+        let result = emergency_rotate(&env, &admin1, &admin3);
+        assert_eq!(result.status, RotationStatus::Completed);
+        assert!(!has_pending_rotation(&env));
+    });
+}
+
+#[test]
+#[should_panic(expected = "no pending rotation")]
+fn test_confirm_rotation_fails_after_emergency_rotate() {
+    let (env, cid) = setup();
+    env.as_contract(&cid, || {
+        set_test_config(&env);
+        let admin1 = Address::generate(&env);
+        let admin2 = Address::generate(&env);
+        let admin3 = Address::generate(&env);
+
+        // Propose planned rotation
+        propose_rotation(&env, &admin1, &admin2);
+
+        // Emergency rotation happens, clearing pending
+        emergency_rotate(&env, &admin1, &admin3);
+
+        // Advance past timelock of the original planned rotation
+        env.ledger()
+            .set_sequence_number(env.ledger().sequence() + 15);
+
+        // Confirming the original planned rotation should fail because it was cleared
+        confirm_rotation(&env, &admin2);
+    });
+}
+
+#[test]
+#[should_panic(expected = "rotation cooldown has not elapsed")]
+fn test_propose_rotation_fails_immediately_after_emergency_rotate() {
+    let (env, cid) = setup();
+    env.as_contract(&cid, || {
+        set_test_config(&env);
+        let admin1 = Address::generate(&env);
+        let admin2 = Address::generate(&env);
+        let admin3 = Address::generate(&env);
+
+        // Advance ledger so last_rotation > 0
+        env.ledger().set_sequence_number(100);
+
+        // Emergency rotation
+        emergency_rotate(&env, &admin1, &admin2);
+
+        // Try to propose another rotation immediately - should fail due to cooldown
+        propose_rotation(&env, &admin2, &admin3);
+    });
+}
+
+#[test]
+fn test_multiple_emergency_rotations_no_cooldown() {
+    let (env, cid) = setup();
+    env.as_contract(&cid, || {
+        set_test_config(&env);
+        let admin1 = Address::generate(&env);
+        let admin2 = Address::generate(&env);
+        let admin3 = Address::generate(&env);
+
+        // Advance ledger so last_rotation > 0
+        env.ledger().set_sequence_number(100);
+
+        // Two emergency rotations in rapid succession
+        emergency_rotate(&env, &admin1, &admin2);
+        // This should succeed even without advancing the ledger further
+        emergency_rotate(&env, &admin2, &admin3);
+
+        assert_eq!(get_rotation_count(&env), 2);
+        let history = get_rotation_history(&env);
+        assert_eq!(history.len(), 2);
+        assert!(history.get(0).unwrap().is_emergency);
+        assert!(history.get(1).unwrap().is_emergency);
+        assert_eq!(history.get(1).unwrap().new_admin, admin3);
+    });
+}
+
+#[test]
+fn test_emergency_rotate_with_expired_pending_rotation() {
+    let (env, cid) = setup();
+    env.as_contract(&cid, || {
+        set_test_config(&env);
+        let admin1 = Address::generate(&env);
+        let admin2 = Address::generate(&env);
+        let admin3 = Address::generate(&env);
+
+        // Advance ledger
+        env.ledger().set_sequence_number(100);
+
+        // Propose planned rotation
+        propose_rotation(&env, &admin1, &admin2);
+
+        // Advance past expiry (31 ledgers)
+        env.ledger()
+            .set_sequence_number(env.ledger().sequence() + 31);
+
+        // Emergency rotation should work and clear the expired pending one
+        let result = emergency_rotate(&env, &admin1, &admin3);
+        assert_eq!(result.status, RotationStatus::Completed);
+        assert!(get_pending_rotation(&env).is_none());
+    });
+}
+
+#[test]
+fn test_emergency_rotate_records_correct_ledger() {
+    let (env, cid) = setup();
+    env.as_contract(&cid, || {
+        set_test_config(&env);
+        let admin1 = Address::generate(&env);
+        let admin2 = Address::generate(&env);
+
+        let target_seq = 200u32;
+        env.ledger().set_sequence_number(target_seq);
+
+        let result = emergency_rotate(&env, &admin1, &admin2);
+        assert_eq!(result.proposed_at, target_seq);
+        assert_eq!(get_last_rotation_ledger(&env), target_seq);
+
+        let history = get_rotation_history(&env);
+        assert_eq!(history.get(0).unwrap().completed_at, target_seq);
+    });
+}
+
+// ════════════════════════════════════════════════════════════════════
 //  Full Scenario Tests
 // ════════════════════════════════════════════════════════════════════
 
@@ -738,6 +939,7 @@ fn test_multiple_rotations_sequential() {
             timelock_ledgers: 2,
             confirmation_window_ledgers: 50,
             cooldown_ledgers: 3,
+            grace_period_ledgers: 5,
         };
         set_rotation_config(&env, &config);
 

@@ -56,6 +56,7 @@ The rotation configuration is adjustable per-contract via `configure_key_rotatio
 | `timelock_ledgers` | 17,280 (~24 hours) | Ledger sequences before confirmation is allowed |
 | `confirmation_window_ledgers` | 34,560 (~48 hours) | Window after timelock during which confirmation is valid |
 | `cooldown_ledgers` | 8,640 (~12 hours) | Minimum gap between consecutive rotations |
+| `grace_period_ledgers` | 17,280 (~24 hours) | Number of ledger sequences the old key remains valid after a planned rotation |
 
 All values assume ~5 seconds per ledger sequence.
 
@@ -81,7 +82,7 @@ Rotation history is capped at **50 records** (`MAX_ROTATION_HISTORY`). When the 
 
 | Method | Auth | Description |
 |--------|------|-------------|
-| `configure_key_rotation(timelock, window, cooldown)` | Admin | Set rotation timing parameters |
+| `configure_key_rotation(timelock, window, cooldown, grace)` | Admin | Set rotation timing parameters |
 | `propose_key_rotation(new_admin)` | Admin | Propose rotating admin to a new address |
 | `confirm_key_rotation(caller)` | New admin | Confirm and complete a pending rotation |
 | `cancel_key_rotation()` | Admin | Cancel a pending planned rotation |
@@ -135,8 +136,29 @@ pub struct RotationRecord {
     pub new_admin: Address,
     pub completed_at: u32,
     pub is_emergency: bool,
+    pub grace_period_end: u32,
 }
 ```
+
+## Emergency Recovery & Adversarial Scenarios
+
+The system is designed to handle complex recovery scenarios and resist common adversarial patterns. These behaviors are verified in the `Emergency Recovery & Adversarial Tests` suite in `contracts/common/src/key_rotation_test.rs`.
+
+### Priority of Emergency Rotations
+An emergency rotation initiated via multisig ALWAYS takes precedence over any pending planned rotation. 
+- **Immediate Cancellation:** Executing an emergency rotation immediately removes any pending `RotationRequest` from storage before completing the new rotation.
+- **Bypassing Cooldown:** Emergency rotations are exempt from the `cooldown_ledgers` requirement. They can be executed at any time, even immediately following a prior rotation.
+- **Timelock Override:** Emergency rotations skip the timelock and confirmation window entirely, completing in a single step.
+
+### Adversarial Safeguards
+- **Cooldown Post-Emergency:** While emergency rotations bypass cooldown, they still *reset* the cooldown timer for future *planned* rotations. A planned rotation cannot be proposed immediately after an emergency rotation until the configured `cooldown_ledgers` have elapsed.
+- **Invalidation of Pending Confirmation:** If an emergency rotation occurs while a planned rotation is in its confirmation window, the proposed new admin of the planned rotation can no longer confirm. Their pending request is gone, and any attempt to confirm will panic with `no pending rotation`.
+- **Expired Rotation Handling:** An emergency rotation can still be executed if a previous planned rotation has expired but hasn't been cancelled or cleared. It will correctly clean up the expired state and record the new recovery admin.
+- **Self-Rotation Prevention:** Both planned and emergency rotations strictly prohibit rotating an admin address to itself. This ensures that every rotation record in the audit trail represents a genuine state change.
+
+### Data Integrity Assumptions
+- **Correct Ledger Attribution:** All rotations (including emergency) record the exact ledger sequence of completion in both the instance state (`LastRotationLedger`) and the historical record (`completed_at`).
+- **Immutable History:** Once a rotation record is appended to the history vector, it cannot be modified or removed except through the automatic trimming process (FIFO) when the `MAX_ROTATION_HISTORY` limit is exceeded.
 
 ## Testing
 
@@ -144,7 +166,7 @@ The key rotation system has comprehensive test coverage across two test suites:
 
 ### Common Module Tests (`contracts/common/src/key_rotation_test.rs`)
 
-40 tests covering the core state machine:
+48 tests covering the core state machine:
 - Configuration (defaults, custom values, validation)
 - Propose/confirm lifecycle
 - Cancel and re-propose
@@ -153,6 +175,7 @@ The key rotation system has comprehensive test coverage across two test suites:
 - Timelock and expiry boundary conditions
 - History accumulation and trimming
 - Sequential rotations
+- **Emergency Recovery Scenarios** (Priority bypass, confirmation invalidation, expired cleanup)
 
 ### Attestation Integration Tests (`contracts/attestation/src/key_rotation_test.rs`)
 
