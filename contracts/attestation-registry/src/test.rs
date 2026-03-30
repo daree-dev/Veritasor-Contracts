@@ -542,3 +542,42 @@ fn version_info_activated_at_is_reasonable() {
     assert!(version_info.activated_at <= ledger_time);
     assert!(ledger_time - version_info.activated_at < 1000); // Within 1 second
 }
+
+// ════════════════════════════════════════════════════════════════════
+//  Reorg-resilience tests
+// ════════════════════════════════════════════════════════════════════
+
+#[test]
+#[should_panic(expected = "new version must be greater than current version")]
+fn reorg_resilience_replay_upgrade_panics() {
+    let (env, client, _admin, _initial_impl) = setup();
+    let new_impl = Address::generate(&env);
+    client.upgrade(&new_impl, &2u32, &None);
+    client.upgrade(&new_impl, &2u32, &None);
+}
+
+#[test]
+#[should_panic(expected = "new version must be greater than current version")]
+fn reorg_resilience_out_of_order_upgrade_panics() {
+    let (env, client, _admin, _initial_impl) = setup();
+    let impl_v2 = Address::generate(&env);
+    let impl_v3 = Address::generate(&env);
+    client.upgrade(&impl_v3, &3u32, &None);
+    client.upgrade(&impl_v2, &2u32, &None);
+}
+
+#[test]
+fn reorg_resilience_upgrade_after_rollback() {
+    let (env, client, _admin, impl_v1) = setup();
+    let impl_v2 = Address::generate(&env);
+    let impl_v3 = Address::generate(&env);
+
+    client.upgrade(&impl_v2, &2u32, &None);
+    client.rollback();
+    assert_eq!(client.get_current_version(), Some(1u32));
+
+    client.upgrade(&impl_v3, &3u32, &None);
+    assert_eq!(client.get_current_version(), Some(3u32));
+    assert_eq!(client.get_previous_version(), Some(1u32));
+    assert_eq!(client.get_previous_implementation(), Some(impl_v1));
+}
