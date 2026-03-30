@@ -131,29 +131,58 @@ fn settle(
     period: String,
     attested_revenue: i128
 )
+
+fn settle_multi(
+    env: Env,
+    agreement_id: u64,
+    periods: Vec<String>,
+    revenues: Vec<i128>
+)
 ```
 
-Settle revenue for a period: verify attestation, calculate repayment, prevent double-spending, transfer funds.
+Settle revenue for one or more periods. `settle` is a convenience wrapper for a single-period `settle_multi`.
 
 **Invariants Enforced**:
 - Agreement must be active (status == 0)
-- Attestation must exist for (business, period)
-- Attestation must not be revoked
-- No prior settlement must exist for this (agreement_id, period)
-- Double-spending protection via commitment tracking
+- Attestations must exist for all provided (business, period) pairs
+- No attestation in the batch must be revoked
+- No prior settlement must exist for any period in the batch
+- Double-spending protection via commitment tracking for each period
 
 **Repayment Calculation**:
+For `settle_multi`, revenue and agreement terms are aggregated across all $N$ periods:
 ```
-repayment = min(
-    (attested_revenue * revenue_share_bps) / 10000,
-    max_repayment_amount
-)
+total_revenue = sum(revenues)
+agg_threshold = min_revenue_threshold * N
+agg_cap = max_repayment_amount * N
 
-if attested_revenue < min_revenue_threshold:
+if total_revenue >= agg_threshold:
+    repayment = min(
+        (total_revenue * revenue_share_bps) / 10000,
+        agg_cap
+    )
+else:
     repayment = 0
 ```
 
-If `repayment > 0`, transfers `repayment` tokens from business to lender.
+If `repayment > 0`, transfers `repayment` tokens from business to lender. Individual settlement records and commitments are stored for each period, with the total repayment distributed across them.
+
+## Multi-Period Netting
+
+The `settle_multi` function enables **netting**, which allows a business to offset losses (negative revenue) in one period against gains in another within the same settlement batch. 
+
+### Netting Example
+- **Agreement**: 10% share, 100k threshold, 500k cap.
+- **Period 1**: 200k revenue.
+- **Period 2**: -50k revenue (e.g., due to returns).
+- **Batch Result**:
+    - Total Revenue: 150k.
+    - Aggregated Threshold: 200k (2 periods * 100k).
+    - Since 150k < 200k, the total repayment is 0. 
+    - Without netting, Period 1 would have triggered a 20k repayment.
+
+### Accounting
+To maintain compatibility with single-period queries, `settle_multi` creates a `SettlementRecord` for each period in the batch. The total repayment is distributed equally across these records (with any remainder added to the final record).
 
 ### Status Management
 
