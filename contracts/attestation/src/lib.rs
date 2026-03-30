@@ -132,6 +132,12 @@ impl AttestationContract {
         access_control::has_role(&env, &account, role)
     }
 
+    /// Submits a single-period attestation.
+    ///
+    /// Expiry enforcement:
+    /// - `expiry_timestamp`, when set, must be strictly greater than both `timestamp`
+    ///   and the current ledger timestamp.
+    /// - Expired-on-arrival attestations are rejected.
     pub fn submit_attestation(
         env: Env,
         business: Address,
@@ -152,6 +158,7 @@ impl AttestationContract {
         if env.storage().instance().has(&key) {
             panic!("attestation exists");
         }
+        Self::validate_expiry(&env, timestamp, expiry_timestamp);
 
         let fee = dynamic_fees::collect_fee(&env, &business);
         dynamic_fees::increment_business_count(&env, &business);
@@ -190,12 +197,39 @@ impl AttestationContract {
         env.storage().instance().get(&key)
     }
 
+    /// Returns true when an attestation exists and has passed its expiry timestamp.
+    ///
+    /// If the attestation has no expiry or does not exist, returns false.
     pub fn is_expired(env: Env, business: Address, period: String) -> bool {
-        if let Some((_, _, _, _, _, Some(expiry_ts))) = Self::get_attestation(env.clone(), business, period) {
-            env.ledger().timestamp() >= expiry_ts
-        } else {
-            false
+        if let Some(data) = Self::get_attestation(env.clone(), business, period) {
+            return Self::attestation_expired(&env, &data);
         }
+        false
+    }
+
+    /// Verifies attestation integrity and freshness for downstream consumers.
+    ///
+    /// Returns true only when:
+    /// - the attestation exists,
+    /// - the attestation is not revoked,
+    /// - the attestation is not expired, and
+    /// - the stored Merkle root matches `merkle_root`.
+    pub fn verify_attestation(
+        env: Env,
+        business: Address,
+        period: String,
+        merkle_root: BytesN<32>,
+    ) -> bool {
+        if let Some(data) = Self::get_attestation(env.clone(), business.clone(), period.clone()) {
+            if Self::attestation_expired(&env, &data) {
+                return false;
+            }
+            if Self::is_revoked(env, business, period) {
+                return false;
+            }
+            return data.0 == merkle_root;
+        }
+        false
     }
 
     pub fn is_revoked(env: Env, business: Address, period: String) -> bool {
