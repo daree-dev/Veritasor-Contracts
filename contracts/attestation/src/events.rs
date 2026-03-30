@@ -1,248 +1,385 @@
 //! # Structured Event Emissions for Attestations
 //!
-//! This module defines and emits structured, indexable events for the
-//! attestation contract lifecycle. Events are designed for compatibility
-//! with off-chain indexers and analytics tools.
+//! This module defines and emits **normalized**, structured, indexable events
+//! for the attestation contract lifecycle.  Every event follows the same
+//! schema contract:
 //!
-//! ## Event Types
-//!
-//! | Event                | Description                                    |
-//! |----------------------|------------------------------------------------|
-//! | AttestationSubmitted | Emitted when a new attestation is submitted    |
-//! | AttestationRevoked   | Emitted when an attestation is revoked         |
-//! | AttestationMigrated  | Emitted when an attestation is migrated        |
-//! | RoleGranted          | Emitted when a role is granted to an address   |
-//! | RoleRevoked          | Emitted when a role is revoked from an address |
-//! | ContractPaused       | Emitted when the contract is paused            |
-//! | ContractUnpaused     | Emitted when the contract is unpaused          |
-//!
-//! ## Event Schema
-//!
-//! Events include:
-//! - Topic: Event type identifier for filtering
-//! - Data: Structured payload with relevant fields
+//! * **Topic tuple** – `(event_type_symbol, …optional_secondary_key)`.
+//! * **Data payload** – a typed `#[contracttype]` struct whose fields are
+//!   exhaustive and backwards-compatible.
+//! * **Schema version** – all data structs carry an implicit schema version
+//!   tracked by `EVENT_SCHEMA_VERSION`.
 //!
 //! Events are designed to:
-//! - Be indexable by off-chain systems
-//! - Include all relevant context without sensitive data
-//! - Support correlation across related events
+//! - Be indexable by off-chain systems via the first topic element.
+//! - Include a secondary topic (usually `business` address) where applicable
+//!   for efficient per-business filtering.
+//! - Contain all relevant context without exposing sensitive data.
+//! - Support correlation across related events via shared `business`/`period`
+//!   fields.
+//!
+//! ## Event Catalog
+//!
+//! | Event                       | Topic symbol   | Secondary topic   |
+//! |-----------------------------|----------------|-------------------|
+//! | `AttestationSubmitted`      | `att_sub`      | `business`        |
+//! | `AttestationRevoked`        | `att_rev`      | `business`        |
+//! | `AttestationMigrated`       | `att_mig`      | `business`        |
+//! | `RoleGranted`               | `role_gr`      | `account`         |
+//! | `RoleRevoked`               | `role_rv`      | `account`         |
+//! | `ContractPaused`            | `paused`       | *(none)*          |
+//! | `ContractUnpaused`          | `unpaus`       | *(none)*          |
+//! | `FeeConfigChanged`          | `fee_cfg`      | *(none)*          |
+//! | `RateLimitConfigChanged`    | `rate_lm`      | *(none)*          |
+//! | `KeyRotationProposed`       | `kr_prop`      | *(none)*          |
+//! | `KeyRotationConfirmed`      | `kr_conf`      | *(none)*          |
+//! | `KeyRotationCancelled`      | `kr_canc`      | *(none)*          |
+//! | `KeyRotationEmergency`      | `kr_emer`      | *(none)*          |
+//! | `BusinessRegistered`        | `biz_reg`      | `business`        |
+//! | `BusinessApproved`          | `biz_apr`      | `business`        |
+//! | `BusinessSuspended`         | `biz_sus`      | `business`        |
+//! | `BusinessReactivated`       | `biz_rea`      | `business`        |
+//!
+//! ## Security Notes
+//!
+//! - Only contract-internal logic calls these functions; no external caller can
+//!   manufacture a spurious event.
+//! - Events are append-only and cannot be reverted after the ledger closes.
+//! - No private keys, raw signatures, or personal data are included in any
+//!   event payload.
 
 use soroban_sdk::{contracttype, symbol_short, Address, BytesN, Env, String, Symbol};
 
 // ════════════════════════════════════════════════════════════════════
-//  Event Topics (Short symbols for efficient indexing)
+//  Schema Version
 // ════════════════════════════════════════════════════════════════════
 
-/// Topic for attestation submission events
-pub const TOPIC_ATTESTATION_SUBMITTED: Symbol = symbol_short!("att_sub");
-/// Topic for attestation revocation events
-pub const TOPIC_ATTESTATION_REVOKED: Symbol = symbol_short!("att_rev");
-/// Topic for attestation migration events
-pub const TOPIC_ATTESTATION_MIGRATED: Symbol = symbol_short!("att_mig");
-/// Topic for role granted events
-pub const TOPIC_ROLE_GRANTED: Symbol = symbol_short!("role_gr");
-/// Topic for role revoked events
-pub const TOPIC_ROLE_REVOKED: Symbol = symbol_short!("role_rv");
-/// Topic for contract paused events
-pub const TOPIC_PAUSED: Symbol = symbol_short!("paused");
-/// Topic for contract unpaused events
-pub const TOPIC_UNPAUSED: Symbol = symbol_short!("unpaus");
-/// Topic for fee configuration events
-pub const TOPIC_FEE_CONFIG: Symbol = symbol_short!("fee_cfg");
-/// Topic for rate limit configuration events
-pub const TOPIC_RATE_LIMIT: Symbol = symbol_short!("rate_lm");
-/// Topic for key rotation proposed events
-pub const TOPIC_KEY_ROTATION_PROPOSED: Symbol = symbol_short!("kr_prop");
-/// Topic for key rotation confirmed events
-pub const TOPIC_KEY_ROTATION_CONFIRMED: Symbol = symbol_short!("kr_conf");
-/// Topic for key rotation cancelled events
-pub const TOPIC_KEY_ROTATION_CANCELLED: Symbol = symbol_short!("kr_canc");
-/// Topic for emergency key rotation events
-pub const TOPIC_KEY_ROTATION_EMERGENCY: Symbol = symbol_short!("kr_emer");
+/// Current event schema version.
+///
+/// Increment this constant whenever a breaking field change is made to *any*
+/// event struct in this module so that off-chain indexers can detect and
+/// handle schema changes.
+pub const EVENT_SCHEMA_VERSION: u32 = 1;
 
-// Topic for business registered
+// ════════════════════════════════════════════════════════════════════
+//  Event Topics  (short symbols ≤ 9 chars for gas efficiency)
+// ════════════════════════════════════════════════════════════════════
+
+/// Topic: attestation successfully submitted
+pub const TOPIC_ATTESTATION_SUBMITTED: Symbol = symbol_short!("att_sub");
+/// Topic: attestation revoked
+pub const TOPIC_ATTESTATION_REVOKED: Symbol = symbol_short!("att_rev");
+/// Topic: attestation migrated to a new version
+pub const TOPIC_ATTESTATION_MIGRATED: Symbol = symbol_short!("att_mig");
+/// Topic: role granted to an address
+pub const TOPIC_ROLE_GRANTED: Symbol = symbol_short!("role_gr");
+/// Topic: role revoked from an address
+pub const TOPIC_ROLE_REVOKED: Symbol = symbol_short!("role_rv");
+/// Topic: contract paused
+pub const TOPIC_PAUSED: Symbol = symbol_short!("paused");
+/// Topic: contract unpaused
+pub const TOPIC_UNPAUSED: Symbol = symbol_short!("unpaus");
+/// Topic: fee configuration updated
+pub const TOPIC_FEE_CONFIG: Symbol = symbol_short!("fee_cfg");
+/// Topic: rate-limit configuration updated
+pub const TOPIC_RATE_LIMIT: Symbol = symbol_short!("rate_lm");
+/// Topic: key rotation proposed (time-locked)
+pub const TOPIC_KEY_ROTATION_PROPOSED: Symbol = symbol_short!("kr_prop");
+/// Topic: key rotation confirmed
+pub const TOPIC_KEY_ROTATION_CONFIRMED: Symbol = symbol_short!("kr_conf");
+/// Topic: key rotation cancelled
+pub const TOPIC_KEY_ROTATION_CANCELLED: Symbol = symbol_short!("kr_canc");
+/// Topic: emergency key rotation executed
+pub const TOPIC_KEY_ROTATION_EMERGENCY: Symbol = symbol_short!("kr_emer");
+/// Topic: business registered
 pub const TOPIC_BIZ_REGISTERED: Symbol = symbol_short!("biz_reg");
-// Topic for business approved
+/// Topic: business approved
 pub const TOPIC_BIZ_APPROVED: Symbol = symbol_short!("biz_apr");
-// Topic for business suspended
+/// Topic: business suspended
 pub const TOPIC_BIZ_SUSPENDED: Symbol = symbol_short!("biz_sus");
-// Topic for business reacticate
+/// Topic: business reactivated
 pub const TOPIC_BIZ_REACTIVATE: Symbol = symbol_short!("biz_rea");
 
 // ════════════════════════════════════════════════════════════════════
-//  Event Data Structures
+//  Normalized Event Data Structures
+//
+//  Rules for all structs:
+//    1. #[contracttype] so they are XDR-serializable.
+//    2. Every public field is documented.
+//    3. No sensitive data (private keys, raw signatures, etc.).
+//    4. Field order is stable — adding new optional fields at the END
+//       is the only backwards-compatible change.
 // ════════════════════════════════════════════════════════════════════
 
-/// Event data for attestation submission
+// ── Attestation lifecycle ─────────────────────────────────────────
+
+/// Normalized payload for `AttestationSubmitted` events.
+///
+/// Emitted once per successful `submit_attestation` call.  The
+/// `proof_hash` and `expiry_timestamp` fields are optional and will
+/// be `None` when the submitter did not provide them.
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct AttestationSubmittedEvent {
-    /// Business address that submitted the attestation
+    /// Business address that submitted the attestation.
     pub business: Address,
-    /// Period identifier (e.g., "2026-02")
+    /// Period identifier (e.g., `"2026-02"`).
     pub period: String,
-    /// Merkle root hash of the attestation data
+    /// Merkle root hash of the attestation dataset.
     pub merkle_root: BytesN<32>,
-    /// Timestamp of the attestation
+    /// Ledger timestamp at submission time.
     pub timestamp: u64,
-    /// Version of the attestation schema
+    /// Schema version used by the submitter.
     pub version: u32,
-    /// Fee paid for this attestation
+    /// Protocol fee collected (in token smallest units).
     pub fee_paid: i128,
-    /// Optional SHA-256 hash pointing to the off-chain proof bundle
+    /// Optional SHA-256 content hash pointing to the off-chain proof bundle.
     pub proof_hash: Option<BytesN<32>>,
-    /// Optional expiry timestamp for the attestation
+    /// Optional Unix timestamp after which this attestation expires.
     pub expiry_timestamp: Option<u64>,
 }
 
-/// Event data for attestation revocation
+/// Normalized payload for `AttestationRevoked` events.
+///
+/// Emitted once per successful `revoke_attestation` call.  The
+/// `reason` field is a free-form string supplied by the revoker.
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct AttestationRevokedEvent {
-    /// Business address whose attestation was revoked
+    /// Business whose attestation was revoked.
     pub business: Address,
-    /// Period identifier of the revoked attestation
+    /// Period identifier of the revoked attestation.
     pub period: String,
-    /// Address that performed the revocation
+    /// Address that performed the revocation (must hold ADMIN role).
     pub revoked_by: Address,
-    /// Reason for revocation (optional context)
+    /// Human-readable revocation reason for audit trail.
     pub reason: String,
 }
 
-/// Event data for attestation migration
+/// Normalized payload for `AttestationMigrated` events.
+///
+/// Contains both old and new values so indexers can reconstruct the
+/// full audit trail without additional storage reads.
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct AttestationMigratedEvent {
-    /// Business address whose attestation was migrated
+    /// Business whose attestation was migrated.
     pub business: Address,
-    /// Period identifier of the migrated attestation
+    /// Period identifier of the migrated attestation.
     pub period: String,
-    /// Old merkle root before migration
+    /// Merkle root hash before migration.
     pub old_merkle_root: BytesN<32>,
-    /// New merkle root after migration
+    /// Merkle root hash after migration.
     pub new_merkle_root: BytesN<32>,
-    /// Old version before migration
+    /// Schema version before migration.
     pub old_version: u32,
-    /// New version after migration
+    /// Schema version after migration (must be strictly greater).
     pub new_version: u32,
-    /// Address that performed the migration
+    /// Address that performed the migration (must hold ADMIN role).
     pub migrated_by: Address,
 }
 
-/// Event data for role changes
+// ── Access control ────────────────────────────────────────────────
+
+/// Normalized payload for `RoleGranted` and `RoleRevoked` events.
+///
+/// A single struct covers both role-change directions; the topic
+/// symbol (`role_gr` vs `role_rv`) distinguishes the direction.
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct RoleChangedEvent {
-    /// Address whose role changed
+    /// Address whose role membership changed.
     pub account: Address,
-    /// Role bitmap that was granted or revoked
+    /// Role bitmap that was granted or revoked.
     pub role: u32,
-    /// Address that made the change
+    /// Address that authorized the change (must hold ADMIN role).
     pub changed_by: Address,
 }
 
-/// Event data for pause state changes
+// ── Pause / unpause ───────────────────────────────────────────────
+
+/// Normalized payload for `ContractPaused` and `ContractUnpaused` events.
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct PauseChangedEvent {
-    /// Address that changed the pause state
+    /// Address that triggered the pause state change.
     pub changed_by: Address,
 }
 
-/// Event data for fee configuration changes
+// ── Fee configuration ─────────────────────────────────────────────
+
+/// Normalized payload for `FeeConfigChanged` events.
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct FeeConfigChangedEvent {
-    /// Token address for fees
+    /// Token contract used for fee collection.
     pub token: Address,
-    /// Fee collector address
+    /// Destination address that receives fees.
     pub collector: Address,
-    /// Base fee amount
+    /// Base fee amount in token smallest units.
     pub base_fee: i128,
-    /// Whether fees are enabled
+    /// Whether fee collection is currently enabled.
     pub enabled: bool,
-    /// Address that made the change
+    /// Address that made the configuration change.
     pub changed_by: Address,
 }
 
-/// Event data for rate limit configuration changes
+// ── Rate limiting ─────────────────────────────────────────────────
+
+/// Normalized payload for `RateLimitConfigChanged` events.
+///
+/// Captures both the standard sliding window and the burst window
+/// so indexers have a complete picture of the rate-limit policy.
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct RateLimitConfigChangedEvent {
-    /// Maximum submissions per business in one window
+    /// Maximum attestation submissions per business in one standard window.
     pub max_submissions: u32,
-    /// Sliding-window duration in seconds
+    /// Standard sliding-window duration in seconds.
     pub window_seconds: u64,
-    /// Maximum submissions allowed in the shorter burst window
+    /// Maximum submissions allowed during the shorter burst window.
     pub burst_max_submissions: u32,
-    /// Burst-window duration in seconds
+    /// Burst-window duration in seconds.
     pub burst_window_seconds: u64,
-    /// Whether rate limiting is enabled
+    /// Whether rate limiting is currently enabled.
     pub enabled: bool,
-    /// Address that made the change
+    /// Address that made the configuration change.
     pub changed_by: Address,
 }
 
-/// Event data for key rotation proposed
+// ── Key rotation ──────────────────────────────────────────────────
+
+/// Normalized payload for `KeyRotationProposed` events.
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct KeyRotationProposedEvent {
-    /// Address of the current admin proposing the rotation
+    /// Current admin address proposing the rotation.
     pub old_admin: Address,
-    /// Address of the proposed new admin
+    /// Proposed new admin address.
     pub new_admin: Address,
-    /// Ledger sequence after which the rotation can be confirmed
+    /// Ledger sequence number after which the rotation can be confirmed.
     pub timelock_until: u32,
-    /// Ledger sequence after which the rotation expires
+    /// Ledger sequence number after which the proposal expires.
     pub expires_at: u32,
 }
 
-/// Event data for key rotation confirmed
+/// Normalized payload for `KeyRotationConfirmed` events.
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct KeyRotationConfirmedEvent {
-    /// Address of the previous admin
+    /// Previous admin address.
     pub old_admin: Address,
-    /// Address of the new admin
+    /// New admin address now in effect.
     pub new_admin: Address,
-    /// Whether this was an emergency rotation
+    /// `true` when this was an emergency rotation (timelock bypassed).
     pub is_emergency: bool,
 }
 
-/// Event data for key rotation cancelled
+/// Normalized payload for `KeyRotationCancelled` events.
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct KeyRotationCancelledEvent {
-    /// Address of the admin who cancelled the rotation
+    /// Address that cancelled the pending rotation.
     pub cancelled_by: Address,
-    /// Address that was proposed as the new admin
+    /// Address that had been proposed as the new admin.
     pub proposed_new_admin: Address,
+}
+
+/// Normalized payload for `KeyRotationEmergency` events.
+///
+/// Emitted when an emergency rotation is executed independently of the
+/// normal timelock flow.  Carries the same shape as a confirmed rotation
+/// for indexer consistency.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct KeyRotationEmergencyEvent {
+    /// Admin address before the emergency rotation.
+    pub old_admin: Address,
+    /// Admin address installed by the emergency rotation.
+    pub new_admin: Address,
+}
+
+// ── Business lifecycle ────────────────────────────────────────────
+
+/// Normalized payload for `BusinessRegistered` events.
+///
+/// Emitted when a new business address is registered in the system.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct BusinessRegisteredEvent {
+    /// Newly registered business address.
+    pub business: Address,
+}
+
+/// Normalized payload for `BusinessApproved` events.
+///
+/// Emitted when a registered business is approved by an admin.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct BusinessApprovedEvent {
+    /// Business address that was approved.
+    pub business: Address,
+    /// Admin address that approved the business.
+    pub approved_by: Address,
+}
+
+/// Normalized payload for `BusinessSuspended` events.
+///
+/// Emitted when an approved business is suspended.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct BusinessSuspendedEvent {
+    /// Business address that was suspended.
+    pub business: Address,
+    /// Admin address that performed the suspension.
+    pub suspended_by: Address,
+    /// Short symbolic reason code for the suspension (e.g., `"fraud"`).
+    pub reason: Symbol,
+}
+
+/// Normalized payload for `BusinessReactivated` events.
+///
+/// Emitted when a suspended business is reinstated.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct BusinessReactivatedEvent {
+    /// Business address that was reactivated.
+    pub business: Address,
+    /// Admin address that performed the reactivation.
+    pub reactivated_by: Address,
 }
 
 // ════════════════════════════════════════════════════════════════════
 //  Event Emission Functions
+//
+//  Naming: emit_<snake_case_event_name>
+//  Topic:  always (TOPIC_CONSTANT, …secondary_key?) – never raw strings
+//  Data:   always a typed struct – never a raw tuple
 // ════════════════════════════════════════════════════════════════════
 
-/// Emit an attestation submitted event.
+// ── Attestation lifecycle ─────────────────────────────────────────
+
+/// Emit an `AttestationSubmitted` event.
 ///
-/// This event is emitted whenever a new attestation is successfully stored.
-/// Indexers can use this to track all attestations submitted to the contract.
+/// Call this once after an attestation has been durably stored on-chain.
+/// Off-chain indexers use the `business` secondary topic for efficient
+/// per-business filtering.
 ///
 /// # Arguments
 ///
-/// * `env` - Env instance
-/// * `business` - Business address that submitted the attestation
-/// * `period` - Period identifier (e.g., "2026-02")
-/// * `merkle_root` - Merkle root hash of the attestation data
-/// * `timestamp` - Timestamp of the attestation
-/// * `version` - Version of the attestation schema
-/// * `fee_paid` - Fee paid for this attestation
-/// * `proof_hash` - Optional SHA-256 hash pointing to the off-chain proof bundle
-/// * `expiry_timestamp` - Optional expiry timestamp for the attestation
+/// * `env`              – Soroban execution environment.
+/// * `business`         – Business address that submitted the attestation.
+/// * `period`           – Period identifier (e.g., `"2026-02"`).
+/// * `merkle_root`      – Merkle root hash of the attestation dataset.
+/// * `timestamp`        – Ledger timestamp at submission time.
+/// * `version`          – Schema version used by the submitter.
+/// * `fee_paid`         – Protocol fee collected.
+/// * `proof_hash`       – Optional SHA-256 off-chain proof-bundle hash.
+/// * `expiry_timestamp` – Optional attestation expiry timestamp.
 ///
 /// # Events
 ///
-/// * AttestationSubmitted - Emitted on successful publication
+/// Publishes `(att_sub, business)` → `AttestationSubmittedEvent`.
 #[allow(clippy::too_many_arguments)]
 pub fn emit_attestation_submitted(
     env: &Env,
@@ -269,22 +406,22 @@ pub fn emit_attestation_submitted(
         .publish((TOPIC_ATTESTATION_SUBMITTED, business.clone()), event);
 }
 
-/// Emit an attestation revoked event.
+/// Emit an `AttestationRevoked` event.
 ///
-/// This event is emitted when an attestation is revoked. The event includes
-/// the reason for revocation to provide context for auditing.
+/// Call this after the revocation record has been written so that the
+/// on-chain state and the event are always consistent.
 ///
 /// # Arguments
 ///
-/// * `env` - Env instance
-/// * `business` - Business address whose attestation was revoked
-/// * `period` - Period identifier of the revoked attestation
-/// * `revoked_by` - Address that performed the revocation
-/// * `reason` - Reason for revocation (optional context)
+/// * `env`        – Soroban execution environment.
+/// * `business`   – Business whose attestation was revoked.
+/// * `period`     – Period identifier.
+/// * `revoked_by` – Address that performed the revocation.
+/// * `reason`     – Free-form revocation reason.
 ///
 /// # Events
 ///
-/// * AttestationRevoked - Emitted on successful publication
+/// Publishes `(att_rev, business)` → `AttestationRevokedEvent`.
 pub fn emit_attestation_revoked(
     env: &Env,
     business: &Address,
@@ -302,25 +439,25 @@ pub fn emit_attestation_revoked(
         .publish((TOPIC_ATTESTATION_REVOKED, business.clone()), event);
 }
 
-/// Emit an attestation migrated event.
+/// Emit an `AttestationMigrated` event.
 ///
-/// This event is emitted when an attestation is migrated to a new version.
-/// The event includes both old and new values for audit trail purposes.
+/// Call this after the migrated attestation has been written.  Both old
+/// and new values are included so indexers do not need an additional read.
 ///
 /// # Arguments
 ///
-/// * `env` - Env instance
-/// * `business` - Business address whose attestation was migrated
-/// * `period` - Period identifier of the migrated attestation
-/// * `old_merkle_root` - Old merkle root before migration
-/// * `new_merkle_root` - New merkle root after migration
-/// * `old_version` - Old version before migration
-/// * `new_version` - New version after migration
-/// * `migrated_by` - Address that performed the migration
+/// * `env`             – Soroban execution environment.
+/// * `business`        – Business whose attestation was migrated.
+/// * `period`          – Period identifier.
+/// * `old_merkle_root` – Merkle root before migration.
+/// * `new_merkle_root` – Merkle root after migration.
+/// * `old_version`     – Schema version before migration.
+/// * `new_version`     – Schema version after migration.
+/// * `migrated_by`     – Address that performed the migration.
 ///
 /// # Events
 ///
-/// * AttestationMigrated - Emitted on successful publication
+/// Publishes `(att_mig, business)` → `AttestationMigratedEvent`.
 #[allow(clippy::too_many_arguments)]
 pub fn emit_attestation_migrated(
     env: &Env,
@@ -345,9 +482,20 @@ pub fn emit_attestation_migrated(
         .publish((TOPIC_ATTESTATION_MIGRATED, business.clone()), event);
 }
 
-/// Emit a role granted event.
+// ── Access control ────────────────────────────────────────────────
+
+/// Emit a `RoleGranted` event.
 ///
-/// This event is emitted when a role is granted to an address.
+/// # Arguments
+///
+/// * `env`        – Soroban execution environment.
+/// * `account`    – Address that received the role.
+/// * `role`       – Role bitmap that was granted.
+/// * `changed_by` – Address that authorized the grant.
+///
+/// # Events
+///
+/// Publishes `(role_gr, account)` → `RoleChangedEvent`.
 pub fn emit_role_granted(env: &Env, account: &Address, role: u32, changed_by: &Address) {
     let event = RoleChangedEvent {
         account: account.clone(),
@@ -358,9 +506,18 @@ pub fn emit_role_granted(env: &Env, account: &Address, role: u32, changed_by: &A
         .publish((TOPIC_ROLE_GRANTED, account.clone()), event);
 }
 
-/// Emit a role revoked event.
+/// Emit a `RoleRevoked` event.
 ///
-/// This event is emitted when a role is revoked from an address.
+/// # Arguments
+///
+/// * `env`        – Soroban execution environment.
+/// * `account`    – Address whose role was revoked.
+/// * `role`       – Role bitmap that was revoked.
+/// * `changed_by` – Address that authorized the revocation.
+///
+/// # Events
+///
+/// Publishes `(role_rv, account)` → `RoleChangedEvent`.
 pub fn emit_role_revoked(env: &Env, account: &Address, role: u32, changed_by: &Address) {
     let event = RoleChangedEvent {
         account: account.clone(),
@@ -371,9 +528,18 @@ pub fn emit_role_revoked(env: &Env, account: &Address, role: u32, changed_by: &A
         .publish((TOPIC_ROLE_REVOKED, account.clone()), event);
 }
 
-/// Emit a contract paused event.
+// ── Pause / unpause ───────────────────────────────────────────────
+
+/// Emit a `ContractPaused` event.
 ///
-/// This event is emitted when the contract is paused.
+/// # Arguments
+///
+/// * `env`        – Soroban execution environment.
+/// * `changed_by` – Address that triggered the pause.
+///
+/// # Events
+///
+/// Publishes `(paused,)` → `PauseChangedEvent`.
 pub fn emit_paused(env: &Env, changed_by: &Address) {
     let event = PauseChangedEvent {
         changed_by: changed_by.clone(),
@@ -381,18 +547,16 @@ pub fn emit_paused(env: &Env, changed_by: &Address) {
     env.events().publish((TOPIC_PAUSED,), event);
 }
 
-/// Emit a contract unpaused event.
-///
-/// This event is emitted when the contract is unpaused.
+/// Emit a `ContractUnpaused` event.
 ///
 /// # Arguments
 ///
-/// * `env` - Env instance
-/// * `changed_by` - Address that changed the pause state
+/// * `env`        – Soroban execution environment.
+/// * `changed_by` – Address that triggered the unpause.
 ///
 /// # Events
 ///
-/// * ContractUnpaused - Emitted on successful publication
+/// Publishes `(unpaus,)` → `PauseChangedEvent`.
 pub fn emit_unpaused(env: &Env, changed_by: &Address) {
     let event = PauseChangedEvent {
         changed_by: changed_by.clone(),
@@ -400,9 +564,22 @@ pub fn emit_unpaused(env: &Env, changed_by: &Address) {
     env.events().publish((TOPIC_UNPAUSED,), event);
 }
 
-/// Emit a fee configuration changed event.
+// ── Fee configuration ─────────────────────────────────────────────
+
+/// Emit a `FeeConfigChanged` event.
 ///
-/// This event is emitted when the fee configuration is updated.
+/// # Arguments
+///
+/// * `env`        – Soroban execution environment.
+/// * `token`      – Token contract address for fee collection.
+/// * `collector`  – Address that receives fees.
+/// * `base_fee`   – Base fee in token smallest units.
+/// * `enabled`    – Whether fee collection is now enabled.
+/// * `changed_by` – Address that made the change.
+///
+/// # Events
+///
+/// Publishes `(fee_cfg,)` → `FeeConfigChangedEvent`.
 pub fn emit_fee_config_changed(
     env: &Env,
     token: &Address,
@@ -421,51 +598,23 @@ pub fn emit_fee_config_changed(
     env.events().publish((TOPIC_FEE_CONFIG,), event);
 }
 
-pub fn emit_business_registered(env: &Env, business: &Address) {
-    env.events()
-        .publish((TOPIC_BIZ_REGISTERED, business.clone()), ());
-}
+// ── Rate limiting ─────────────────────────────────────────────────
 
-pub fn emit_business_approved(env: &Env, business: &Address, approved_by: &Address) {
-    env.events()
-        .publish((TOPIC_BIZ_APPROVED, business.clone()), approved_by.clone());
-}
-
-pub fn emit_business_suspended(
-    env: &Env,
-    business: &Address,
-    suspended_by: &Address,
-    reason: Symbol,
-) {
-    env.events().publish(
-        (TOPIC_BIZ_SUSPENDED, business.clone()),
-        (suspended_by.clone(), reason),
-    );
-}
-
-pub fn emit_business_reactivated(env: &Env, business: &Address, reactivated_by: &Address) {
-    env.events().publish(
-        (TOPIC_BIZ_REACTIVATE, business.clone()),
-        reactivated_by.clone(),
-    );
-}
-
-/// Emit a rate limit configuration changed event.
-///
-/// This event is emitted when the rate limit configuration is created or
-/// updated by the admin.
+/// Emit a `RateLimitConfigChanged` event.
 ///
 /// # Arguments
 ///
-/// * `env` - Env instance
-/// * `max_submissions` - Maximum submissions per business in one window
-/// * `window_seconds` - Sliding-window duration in seconds
-/// * `enabled` - Whether rate limiting is enabled
-/// * `changed_by` - Address that made the change
+/// * `env`                  – Soroban execution environment.
+/// * `max_submissions`      – Max attestations per standard window.
+/// * `window_seconds`       – Standard window duration in seconds.
+/// * `burst_max_submissions`– Max submissions during the burst window.
+/// * `burst_window_seconds` – Burst window duration in seconds.
+/// * `enabled`              – Whether rate limiting is now enabled.
+/// * `changed_by`           – Address that made the change.
 ///
 /// # Events
 ///
-/// * RateLimitConfigChanged - Emitted on successful publication
+/// Publishes `(rate_lm,)` → `RateLimitConfigChangedEvent`.
 pub fn emit_rate_limit_config_changed(
     env: &Env,
     max_submissions: u32,
@@ -486,21 +635,21 @@ pub fn emit_rate_limit_config_changed(
     env.events().publish((TOPIC_RATE_LIMIT,), event);
 }
 
-/// Emit a key rotation proposed event.
-///
-/// This event is emitted when an admin proposes a key rotation.
+// ── Key rotation ──────────────────────────────────────────────────
+
+/// Emit a `KeyRotationProposed` event.
 ///
 /// # Arguments
 ///
-/// * `env` - Env instance
-/// * `old_admin` - Address of the current admin proposing the rotation
-/// * `new_admin` - Address of the proposed new admin
-/// * `timelock_until` - Ledger sequence after which the rotation can be confirmed
-/// * `expires_at` - Ledger sequence after which the rotation expires
+/// * `env`            – Soroban execution environment.
+/// * `old_admin`      – Current admin proposing the rotation.
+/// * `new_admin`      – Proposed new admin.
+/// * `timelock_until` – Ledger sequence after which rotation can be confirmed.
+/// * `expires_at`     – Ledger sequence after which the proposal expires.
 ///
 /// # Events
 ///
-/// * KeyRotationProposed - Emitted on successful publication
+/// Publishes `(kr_prop,)` → `KeyRotationProposedEvent`.
 pub fn emit_key_rotation_proposed(
     env: &Env,
     old_admin: &Address,
@@ -517,20 +666,18 @@ pub fn emit_key_rotation_proposed(
     env.events().publish((TOPIC_KEY_ROTATION_PROPOSED,), event);
 }
 
-/// Emit a key rotation confirmed event.
-///
-/// This event is emitted when a rotation is successfully confirmed.
+/// Emit a `KeyRotationConfirmed` event.
 ///
 /// # Arguments
 ///
-/// * `env` - Env instance
-/// * `old_admin` - Address of the previous admin
-/// * `new_admin` - Address of the new admin
-/// * `is_emergency` - Whether this was an emergency rotation
+/// * `env`          – Soroban execution environment.
+/// * `old_admin`    – Previous admin address.
+/// * `new_admin`    – New admin address.
+/// * `is_emergency` – Whether this was an emergency rotation.
 ///
 /// # Events
 ///
-/// * KeyRotationConfirmed - Emitted on successful publication
+/// Publishes `(kr_conf,)` → `KeyRotationConfirmedEvent`.
 pub fn emit_key_rotation_confirmed(
     env: &Env,
     old_admin: &Address,
@@ -545,19 +692,17 @@ pub fn emit_key_rotation_confirmed(
     env.events().publish((TOPIC_KEY_ROTATION_CONFIRMED,), event);
 }
 
-/// Emit a key rotation cancelled event.
-///
-/// This event is emitted when a pending rotation is cancelled.
+/// Emit a `KeyRotationCancelled` event.
 ///
 /// # Arguments
 ///
-/// * `env` - Env instance
-/// * `cancelled_by` - Address of the admin who cancelled the rotation
-/// * `proposed_new_admin` - Address that was proposed as the new admin
+/// * `env`                – Soroban execution environment.
+/// * `cancelled_by`       – Admin that cancelled the pending rotation.
+/// * `proposed_new_admin` – Address that had been proposed.
 ///
 /// # Events
 ///
-/// * KeyRotationCancelled - Emitted on successful publication
+/// Publishes `(kr_canc,)` → `KeyRotationCancelledEvent`.
 pub fn emit_key_rotation_cancelled(
     env: &Env,
     cancelled_by: &Address,
@@ -568,4 +713,119 @@ pub fn emit_key_rotation_cancelled(
         proposed_new_admin: proposed_new_admin.clone(),
     };
     env.events().publish((TOPIC_KEY_ROTATION_CANCELLED,), event);
+}
+
+/// Emit a `KeyRotationEmergency` event.
+///
+/// Unlike the normal timelock flow, emergency rotations bypass the
+/// confirmation window.  This event provides an audit trail for any
+/// emergency change.
+///
+/// # Arguments
+///
+/// * `env`       – Soroban execution environment.
+/// * `old_admin` – Admin address before the emergency rotation.
+/// * `new_admin` – Admin address installed by the emergency rotation.
+///
+/// # Events
+///
+/// Publishes `(kr_emer,)` → `KeyRotationEmergencyEvent`.
+pub fn emit_key_rotation_emergency(env: &Env, old_admin: &Address, new_admin: &Address) {
+    let event = KeyRotationEmergencyEvent {
+        old_admin: old_admin.clone(),
+        new_admin: new_admin.clone(),
+    };
+    env.events().publish((TOPIC_KEY_ROTATION_EMERGENCY,), event);
+}
+
+// ── Business lifecycle ────────────────────────────────────────────
+
+/// Emit a `BusinessRegistered` event.
+///
+/// # Arguments
+///
+/// * `env`      – Soroban execution environment.
+/// * `business` – Newly registered business address.
+///
+/// # Events
+///
+/// Publishes `(biz_reg, business)` → `BusinessRegisteredEvent`.
+pub fn emit_business_registered(env: &Env, business: &Address) {
+    let event = BusinessRegisteredEvent {
+        business: business.clone(),
+    };
+    env.events()
+        .publish((TOPIC_BIZ_REGISTERED, business.clone()), event);
+}
+
+/// Emit a `BusinessApproved` event.
+///
+/// # Arguments
+///
+/// * `env`         – Soroban execution environment.
+/// * `business`    – Business address that was approved.
+/// * `approved_by` – Admin address that approved the business.
+///
+/// # Events
+///
+/// Publishes `(biz_apr, business)` → `BusinessApprovedEvent`.
+pub fn emit_business_approved(env: &Env, business: &Address, approved_by: &Address) {
+    let event = BusinessApprovedEvent {
+        business: business.clone(),
+        approved_by: approved_by.clone(),
+    };
+    env.events()
+        .publish((TOPIC_BIZ_APPROVED, business.clone()), event);
+}
+
+/// Emit a `BusinessSuspended` event.
+///
+/// # Arguments
+///
+/// * `env`          – Soroban execution environment.
+/// * `business`     – Business address that was suspended.
+/// * `suspended_by` – Admin address that performed the suspension.
+/// * `reason`       – Short symbolic reason code for the suspension.
+///
+/// # Security
+///
+/// The `reason` parameter is a `Symbol` (not a `String`) to prevent
+/// unbounded arbitrary data from being stored on-chain via this event.
+///
+/// # Events
+///
+/// Publishes `(biz_sus, business)` → `BusinessSuspendedEvent`.
+pub fn emit_business_suspended(
+    env: &Env,
+    business: &Address,
+    suspended_by: &Address,
+    reason: Symbol,
+) {
+    let event = BusinessSuspendedEvent {
+        business: business.clone(),
+        suspended_by: suspended_by.clone(),
+        reason,
+    };
+    env.events()
+        .publish((TOPIC_BIZ_SUSPENDED, business.clone()), event);
+}
+
+/// Emit a `BusinessReactivated` event.
+///
+/// # Arguments
+///
+/// * `env`             – Soroban execution environment.
+/// * `business`        – Business address that was reactivated.
+/// * `reactivated_by`  – Admin address that performed the reactivation.
+///
+/// # Events
+///
+/// Publishes `(biz_rea, business)` → `BusinessReactivatedEvent`.
+pub fn emit_business_reactivated(env: &Env, business: &Address, reactivated_by: &Address) {
+    let event = BusinessReactivatedEvent {
+        business: business.clone(),
+        reactivated_by: reactivated_by.clone(),
+    };
+    env.events()
+        .publish((TOPIC_BIZ_REACTIVATE, business.clone()), event);
 }
