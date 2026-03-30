@@ -1,7 +1,25 @@
+//! Comprehensive tests for nonce-based replay protection with nonce partitioning.
+//!
+//! Coverage:
+//!   - Core nonce semantics (start, increment, replay, skip, overflow)
+//!   - Channel partitioning isolation (cross-channel, cross-actor)
+//!   - Well-known channel constants and classification
+//!   - Partition-aware bulk query/reset utilities
+//!   - Adversarial cross-partition replay attack scenarios
+//!   - Boundary values (u32::MAX channel, u64::MAX nonce, channel 0)
+//!   - Multi-actor × multi-channel stress tests
+//!   - Reset semantics and replay-after-reset
+//!   - Ordering and determinism guarantees
+
 use soroban_sdk::testutils::Address as _;
 use soroban_sdk::{contract, contractimpl, Address, Env};
 
-use crate::replay_protection::{get_nonce, peek_next_nonce, verify_and_increment_nonce};
+use crate::replay_protection::{
+    get_nonce, get_nonces_for_channels, is_custom_channel, is_well_known_channel,
+    peek_next_nonce, reset_nonce, reset_nonces_for_channels, verify_and_increment_nonce,
+    CHANNEL_ADMIN, CHANNEL_BUSINESS, CHANNEL_CUSTOM_START, CHANNEL_GOVERNANCE, CHANNEL_MULTISIG,
+    CHANNEL_PROTOCOL,
+};
 
 #[contract]
 pub struct ReplayProtectionTestContract;
