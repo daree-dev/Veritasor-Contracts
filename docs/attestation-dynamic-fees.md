@@ -196,7 +196,9 @@ stellar contract invoke --network testnet --source <ADMIN_KEY> \
 
 ## Test Coverage
 
-27 tests covering:
+**61 tests** covering:
+
+### Unit Tests (`dynamic_fees_test.rs`)
 
 - **Pure arithmetic** (7 tests): `compute_fee` with all discount combinations including edge cases (zero base, full discount)
 - **Flat fee** (1 test): No discounts configured, full base fee charged
@@ -214,8 +216,18 @@ stellar contract invoke --network testnet --source <ADMIN_KEY> \
 Run tests:
 
 ```bash
+# All tests (unit + property)
 cd contracts/attestation
 cargo test
+
+# Property tests only
+cargo test -- property_test
+
+# Fee monotonicity tests only (§K–§P)
+cargo test -- prop_fee_monotone prop_fee_multiplicative prop_fee_discount prop_additive prop_tier_upgrade prop_volume_bracket prop_sequential prop_combined prop_arithmetic prop_no_overflow prop_minimal prop_tier_assignment prop_fee_toggle prop_zero_threshold prop_tier_reassignment prop_regression prop_get_fee_quote
+
+# With verbose output to see proptest case counts
+cargo test -- --nocapture 2>&1 | grep -E "(PASSED|FAILED|running|proptest)"
 ```
 
 ---

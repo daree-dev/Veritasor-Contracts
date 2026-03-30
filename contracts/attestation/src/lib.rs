@@ -75,6 +75,10 @@ pub mod registry;
 #[cfg(test)]
 mod rate_limit_test;
 
+#[cfg(test)]
+mod property_test;
+
+
 pub use access_control::{ROLE_ADMIN, ROLE_ATTESTOR, ROLE_BUSINESS, ROLE_OPERATOR};
 pub use dynamic_fees::{compute_fee, DataKey, FeeConfig};
 pub use events::{AttestationMigratedEvent, AttestationRevokedEvent, AttestationSubmittedEvent};
@@ -322,13 +326,14 @@ impl AttestationContract {
         // Track volume for future discount calculations.
         dynamic_fees::increment_business_count(&env, &business);
 
-        let data = (
+        let data: AttestationData = (
             merkle_root.clone(),
             timestamp,
             version,
             fee_paid,
             proof_hash.clone(),
             expiry_timestamp,
+            false, // not revoked
         );
         let data = (merkle_root.clone(), timestamp, version, total_fee);
         env.storage().instance().set(&key, &data);
@@ -1376,6 +1381,57 @@ impl AttestationContract {
     /// Return the next nonce required for the given actor/channel pair.
     pub fn get_replay_nonce(env: Env, actor: Address, channel: u32) -> u64 {
         replay_protection::get_nonce(&env, &actor, channel)
+    }
+
+    pub fn pause(env: Env, admin: Address) {
+        access_control::require_admin(&env, &admin);
+        dynamic_fees::set_paused(&env, true);
+    }
+
+    pub fn unpause(env: Env, admin: Address) {
+        access_control::require_admin(&env, &admin);
+        dynamic_fees::set_paused(&env, false);
+    }
+
+    pub fn is_paused(env: Env) -> bool {
+        dynamic_fees::is_paused(&env)
+    }
+
+    pub fn set_fee_enabled(env: Env, admin: Address, enabled: bool) {
+        access_control::require_admin(&env, &admin);
+        dynamic_fees::set_fee_enabled(&env, enabled);
+    }
+
+    pub fn set_tier_discount(env: Env, admin: Address, tier: u32, discount_bps: u32) {
+        access_control::require_admin(&env, &admin);
+        dynamic_fees::set_tier_discount(&env, tier, discount_bps);
+    }
+
+    pub fn set_business_tier(env: Env, admin: Address, business: Address, tier: u32) {
+        access_control::require_admin(&env, &admin);
+        dynamic_fees::set_business_tier(&env, &business, tier);
+    }
+
+    pub fn set_volume_brackets(
+        env: Env,
+        admin: Address,
+        thresholds: Vec<u64>,
+        discounts: Vec<u32>,
+    ) {
+        access_control::require_admin(&env, &admin);
+        dynamic_fees::set_volume_brackets(&env, &thresholds, &discounts);
+    }
+
+    pub fn get_fee_quote(env: Env, business: Address) -> i128 {
+        dynamic_fees::calculate_fee(&env, &business)
+    }
+
+    pub fn get_business_count(env: Env, business: Address) -> u64 {
+        dynamic_fees::get_business_count(&env, &business)
+    }
+
+    pub fn get_business_tier(env: Env, business: Address) -> u32 {
+        dynamic_fees::get_business_tier(&env, &business)
     }
 }
 
