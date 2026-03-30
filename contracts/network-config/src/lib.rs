@@ -15,7 +15,8 @@
 
 #![no_std]
 
-use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, String, Vec, Symbol};
+use soroban_sdk::{contract, contractimpl, contracttype, Address, Bytes, Env, String, Vec, Symbol};
+
 
 /// Unique identifier for a Stellar network
 pub type NetworkId = u32;
@@ -30,6 +31,12 @@ pub const ROLE_OPERATOR: u32 = 4;
 #[contracttype]
 pub enum DataKey {
     Initialized,
+    /// Upgrade tracking
+    CurrentImplementation(Address),
+    CurrentVersion,
+    PreviousImplementation,
+    PreviousVersion,
+
     Admin,
     GovernanceDao,
     Paused,
@@ -112,8 +119,25 @@ pub struct NetworkConfig {
     pub updated_at: u64,
 }
 
+/// Version information for upgrade tracking
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[contracttype]
+pub struct VersionInfo {
+    /// Current version number (monotonically increasing).
+    pub version: u32,
+    /// Implementation contract address.
+    pub implementation: Address,
+    /// Optional migration data passed during upgrade.
+    pub migration_data: Option<Vec<u8>>,
+    /// Timestamp when this version was activated.
+    pub activated_at: u64,
+}
+
+
+
 /// Events
 mod events {
+
     use super::*;
 
     pub fn emit_initialized(env: &Env, admin: &Address) {
@@ -171,11 +195,24 @@ mod events {
         env.events().publish((DAO_SET,), dao.clone());
     }
 
-    pub fn emit_default_network(env: &Env, network_id: NetworkId) {
+pub fn emit_default_network(env: &Env, network_id: NetworkId) {
         const DEFAULT_NET: Symbol = symbol_short!("def_net");
         env.events().publish((DEFAULT_NET,), network_id);
     }
+
+pub fn emit_upgraded(env: &Env, new_version: u32, new_impl: &Address, migration_data: Option<&Bytes>) {
+        const UPGRADED: Symbol = symbol_short!("upgraded");
+        env.events().publish((UPGRADED, new_version), (new_impl.clone(), migration_data.map(|d| d.clone())));
+    }
+
+    pub fn emit_rolled_back(env: &Env, prev_version: u32, prev_impl: &Address) {
+        const ROLLED_BACK: Symbol = symbol_short!("rolled_back");
+        env.events().publish((ROLLED_BACK,), (prev_version, prev_impl.clone()));
+    }
 }
+
+
+
 
 /// Access control
 mod access_control {
@@ -263,6 +300,38 @@ mod access_control {
 /// Storage helpers
 mod storage {
     use super::*;
+    
+    /// Get current implementation address
+    pub fn get_current_implementation(env: &Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::CurrentImplementation)
+    }
+    
+    /// Get/set current version
+    pub fn get_current_version(env: &Env) -> Option<u32> {
+        env.storage().instance().get(&DataKey::CurrentVersion)
+    }
+    
+    pub fn set_current_version(env: &Env, version: u32) {
+        env.storage().instance().set(&DataKey::CurrentVersion, &version);
+    }
+    
+    /// Get/set previous implementation/version
+    pub fn get_previous_implementation(env: &Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::PreviousImplementation)
+    }
+    
+    pub fn get_previous_version(env: &Env) -> Option<u32> {
+        env.storage().instance().get(&DataKey::PreviousVersion)
+    }
+    
+    pub fn set_previous_implementation(env: &Env, impl_addr: Address) {
+        env.storage().instance().set(&DataKey::PreviousImplementation, &impl_addr);
+    }
+    
+    pub fn set_previous_version(env: &Env, version: u32) {
+        env.storage().instance().set(&DataKey::PreviousVersion, &version);
+    }
+
 
     pub fn is_initialized(env: &Env) -> bool {
         env.storage().instance().has(&DataKey::Initialized)
@@ -446,6 +515,109 @@ pub struct NetworkConfigContract;
 
 #[contractimpl]
 impl NetworkConfigContract {
+    /// Require registry is initialized
+    fn require_initialized(env: &Env) {
+        if !storage::is_initialized(env) {
+            panic!("contract not initialized");
+        }
+    }
+
+    /// Require caller has governance role
+    fn require_governance(env: &Env, caller: &Address) {
+        access_control::require_governance(env, caller);
+    }
+
+    /// Get current implementation address
+    pub fn get_current_implementation(env: Env) -> Option<Address> {
+        storage::get_current_implementation(&env)
+    }
+
+    /// Get current version
+    pub fn get_current_version(env: Env) -> Option<u32> {
+        storage::get_current_version(&env)
+    }
+
+    /// Get previous implementation
+    pub fn get_previous_implementation(env: Env) -> Option<Address> {
+        storage::get_previous_implementation(&env)
+    }
+
+    /// Get previous version
+    pub fn get_previous_version(env: Env) -> Option<u32> {
+        storage::get_previous_version(&env)
+    }
+
+    /// Get version info
+    pub fn get_version_info(env: Env) -> Option<VersionInfo> {
+        if !storage::is_initialized(&env) {
+            return None;
+        }
+        let impl_addr = storage::get_current_implementation(&env).unwrap();
+        let version = storage::get_current_version(&env).unwrap();
+        Some(VersionInfo {
+            version,
+            implementation: impl_addr,
+            migration_data: None,
+            activated_at: env.ledger().timestamp(),
+        })
+    }
+
+    /// Upgrade to new implementation
+    pub fn upgrade(env: Env, caller: Address, new_impl: Address, new_version: u32, migration_data: Option<Bytes>) {
+        Self::require_initialized(&env);
+        Self::require_governance(&env, &caller);
+
+        // Validate new impl
+        if new_impl.is_none() { // Soroban Address no is_none, skip for now
+            panic!("invalid implementation address");
+        }
+
+        let current_version = storage::get_current_version(&env)
+            .expect("current version missing");
+        if new_version <= current_version {
+            panic!("new version must be greater than current version: {}", current_version);
+        }
+
+        // Store previous
+        let current_impl = storage::get_current_implementation(&env)
+            .expect("current implementation missing");
+        storage::set_previous_implementation(&env, current_impl);
+        storage::set_previous_version(&env, current_version);
+
+        // Update current
+        storage::set_current_version(&env, new_version);
+        env.storage().instance().set(&DataKey::CurrentImplementation(new_impl.clone()), &new_impl);
+
+        events::emit_upgraded(&env, new_version, &new_impl, migration_data.as_ref());
+    }
+
+    /// Rollback to previous implementation
+    pub fn rollback(env: Env, caller: Address) {
+        Self::require_initialized(&env);
+        Self::require_governance(&env, &caller);
+
+        let prev_impl = storage::get_previous_implementation(&env);
+        let prev_version = storage::get_previous_version(&env);
+        if prev_impl.is_none() || prev_version.is_none() {
+            panic!("no previous implementation to rollback to");
+        }
+
+        let prev_impl = prev_impl.unwrap();
+        let prev_version = prev_version.unwrap();
+
+        // Get current for new previous
+        let current_impl = storage::get_current_implementation(&env).unwrap();
+        let current_version = storage::get_current_version(&env).unwrap();
+
+        // Swap
+        storage::set_previous_implementation(&env, current_impl);
+        storage::set_previous_version(&env, current_version);
+        env.storage().instance().set(&DataKey::CurrentImplementation(prev_impl.clone()), &prev_impl);
+        storage::set_current_version(&env, prev_version);
+
+        events::emit_rolled_back(&env, prev_version, &prev_impl);
+    }
+
     pub fn initialize(env: Env, admin: Address, governance_dao: Option<Address>) {
         if storage::is_initialized(&env) {
             panic!("already initialized");

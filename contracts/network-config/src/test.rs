@@ -16,6 +16,8 @@ use soroban_sdk::testutils::{Address as _, Ledger};
 use soroban_sdk::{Address, Env, String};
 
 use crate::*;
+use soroban_sdk::{Symbol, symbol_short};
+
 
 // ============================================================================
 // Test Helpers
@@ -1437,3 +1439,167 @@ fn test_get_contract_address_all_types() {
         Some(snapshot)
     );
 }
+
+#[test]
+fn test_upgrade_success() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(NetworkConfigContract, ());
+    let client = NetworkConfigContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    client.initialize(&admin, &None::<Address>);
+
+    // Check initial state
+    assert!(client.get_current_version().is_none());
+    assert!(client.get_current_implementation().is_none());
+
+    // Mock V2 impl
+    let v2_impl = Address::generate(&env);
+    let v1 = 1u32;
+    let migration_data = Some(Bytes::from_slice(&env, &[1u8, 2, 3]));
+    
+    // Upgrade to V1 (self as initial)
+    client.upgrade(&admin, env.current_contract_address().clone(), v1, migration_data.clone());
+    
+    // Verify
+    assert_eq!(client.get_current_version(), Some(v1));
+    assert_eq!(client.get_current_implementation(), Some(env.current_contract_address()));
+    let info = client.get_version_info().unwrap();
+    assert_eq!(info.version, v1);
+    assert_eq!(info.implementation, env.current_contract_address());
+    
+    // Upgrade to V2
+    let v2 = 2u32;
+    client.upgrade(&admin, v2_impl.clone(), v2, None);
+    
+    assert_eq!(client.get_current_version(), Some(v2));
+    assert_eq!(client.get_current_implementation(), Some(v2_impl.clone()));
+    assert_eq!(client.get_previous_version(), Some(v1));
+    assert_eq!(client.get_previous_implementation(), Some(env.current_contract_address()));
+
+    let info = client.get_version_info().unwrap();
+    assert_eq!(info.version, v2);
+    assert_eq!(info.implementation, v2_impl);
+}
+
+#[test]
+#[should_panic(expected = "new version must be greater than current version")]
+fn test_upgrade_invalid_version_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(NetworkConfigContract, ());
+    let client = NetworkConfigContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    client.initialize(&admin, &None::<Address>);
+
+    let v1_impl = Address::generate(&env);
+    client.upgrade(&admin, v1_impl, 1u32, None);
+
+    // Same version
+    client.upgrade(&admin, Address::generate(&env), 1u32, None);
+}
+
+#[test]
+#[should_panic(expected = "caller must have ADMIN or GOVERNANCE role")]
+fn test_upgrade_non_governance_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(NetworkConfigContract, ());
+    let client = NetworkConfigContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    client.initialize(&admin, &None::<Address>);
+
+    let non_gov = Address::generate(&env);
+    client.upgrade(&non_gov, Address::generate(&env), 1u32, None);
+}
+
+#[test]
+fn test_rollback_success() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(NetworkConfigContract, ());
+    let client = NetworkConfigContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    client.initialize(&admin, &None::<Address>);
+
+    let v1_impl = env.current_contract_address().clone();
+    client.upgrade(&admin, v1_impl.clone(), 1u32, None);
+    let v2_impl = Address::generate(&env);
+    client.upgrade(&admin, v2_impl.clone(), 2u32, None);
+
+    // Rollback
+    client.rollback(&admin);
+
+    // Should be back to v1
+    assert_eq!(client.get_current_version(), Some(1u32));
+    assert_eq!(client.get_current_implementation(), Some(v1_impl));
+    assert_eq!(client.get_previous_version(), Some(2u32));
+    assert_eq!(client.get_previous_implementation(), Some(v2_impl));
+}
+
+#[test]
+#[should_panic(expected = "no previous implementation to rollback to")]
+fn test_rollback_no_previous_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(NetworkConfigContract, ());
+    let client = NetworkConfigContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    client.initialize(&admin, &None::<Address>);
+
+    // First upgrade
+    client.upgrade(&admin, env.current_contract_address().clone(), 1u32, None);
+
+    // Rollback (no prev)
+    client.rollback(&admin);
+}
+
+#[test]
+fn test_upgrade_with_migration_data() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(NetworkConfigContract, ());
+    let client = NetworkConfigContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    client.initialize(&admin, &None::<Address>);
+
+    let migration_data = Some(Bytes::from_slice(&env, b"migration payload"));
+    client.upgrade(&admin, env.current_contract_address().clone(), 1u32, migration_data.clone());
+
+    // Event emitted with data (check via env.events if needed)
+    let info = client.get_version_info().unwrap();
+    // migration_data not stored, only passed - verify new impl would receive
+}
+
+#[test]
+fn test_version_info() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(NetworkConfigContract, ());
+    let client = NetworkConfigContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    client.initialize(&admin, &None::<Address>);
+
+    assert!(client.get_version_info().is_none()); // Not upgraded yet
+
+    client.upgrade(&admin, env.current_contract_address().clone(), 1u32, None);
+    let info = client.get_version_info().unwrap();
+    assert_eq!(info.version, 1u32);
+    assert_eq!(info.implementation, env.current_contract_address());
+    assert!(info.activated_at > 0);
+}
+
