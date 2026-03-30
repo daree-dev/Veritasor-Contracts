@@ -32,6 +32,7 @@ pub enum DataKey {
     Agreement(u64),
     Committed(u64, String),
     Settlement(u64, String),
+    BusinessPeriodToken(Address, String),
 }
 
 #[contracttype]
@@ -173,51 +174,35 @@ impl RevenueSettlementContract {
         let attestation_client =
             attestation_import::AttestationContractClient::new(&env, &agreement.attestation_contract);
 
-        let mut total_revenue: i128 = 0;
-        let num_periods = periods.len() as i128;
-
-        // Phase 1: Verification and commitment
-        for i in 0..periods.len() {
-            let period = periods.get(i).unwrap();
-            let revenue = revenues.get(i).unwrap();
-
-            // Prevent double-settling
-            let existing: Option<SettlementRecord> = env
-                .storage()
-                .instance()
-                .get(&DataKey::Settlement(agreement_id, period.clone()));
-            assert!(existing.is_none(), "already settled for period");
-
-            // Verify attestation
-            assert!(
-                attestation_client
-                    .get_attestation(&agreement.business, &period)
-                    .is_some(),
-                "attestation not found for period"
-            );
-            assert!(
-                !attestation_client.is_revoked(&agreement.business, &period),
-                "attestation is revoked for period"
-            );
-
-            // Double-spending prevention
-            let committed_key = DataKey::Committed(agreement_id, period.clone());
-            let previously_committed: i128 = env
-                .storage()
-                .instance()
-                .get(&committed_key)
-                .unwrap_or(0);
+        // Prevent cross-token settlement for the same business and attestation period.
+        let business_period_token_key =
+            DataKey::BusinessPeriodToken(agreement.business.clone(), period.clone());
+        let business_period_token: Option<Address> = env
+            .storage()
+            .instance()
+            .get(&business_period_token_key);
+        if let Some(existing_token) = business_period_token {
             assert_eq!(
-                previously_committed, 0,
-                "commitment already made for period"
+                existing_token, agreement.token,
+                "multi-currency settlement not allowed for period"
             );
-
-            total_revenue = total_revenue.saturating_add(revenue);
+        } else {
+            env.storage()
+                .instance()
+                .set(&business_period_token_key, &agreement.token);
         }
 
-        // Phase 2: Repayment Calculation with Aggregated Terms
-        let agg_threshold = agreement.min_revenue_threshold.saturating_mul(num_periods);
-        let agg_cap = agreement.max_repayment_amount.saturating_mul(num_periods);
+        // Check commitment not already made for this period
+        let committed_key = DataKey::Committed(agreement_id, period.clone());
+        let previously_committed: i128 = env
+            .storage()
+            .instance()
+            .get(&committed_key)
+            .unwrap_or(0);
+        assert_eq!(
+            previously_committed, 0,
+            "commitment already made for period"
+        );
 
         let total_repayment_amount = if total_revenue >= agg_threshold && total_revenue > 0 {
             let share = (total_revenue as u128)
