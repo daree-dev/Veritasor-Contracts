@@ -1,8 +1,14 @@
 #![no_std]
-use soroban_sdk::{contract, contractimpl, contracttype, Address, BytesN, Env, String, Vec};
+
+use soroban_sdk::{
+    contract, contractimpl, contracttype, Address, BytesN, Env, String, Symbol, Vec,
+};
+
+
 
 #[cfg(test)]
 mod expiry_test;
+
 
 /// Attestor staking client: WASM import for wasm32, crate client for host builds.
 #[cfg(target_arch = "wasm32")]
@@ -13,6 +19,9 @@ mod attestor_staking_import {
     pub use Client as AttestorStakingContractClient;
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+#[cfg(target_arch = "wasm32")]
+use attestor_staking_import::AttestorStakingContractClient;
 const STATUS_KEY_TAG: u32 = 1;
 const ADMIN_KEY_TAG: (u32,) = (2,);
 const ANOMALY_KEY_TAG: (u32,) = (3,);
@@ -56,6 +65,7 @@ use soroban_sdk::{contract, contractimpl, contracttype, Address, BytesN, Env, St
 
 pub mod dynamic_fees;
 pub mod events;
+pub mod extended_metadata;
 pub mod fees;
 pub mod multisig;
 pub mod rate_limit;
@@ -166,7 +176,13 @@ impl AttestationContract {
         access_control::grant_role(&env, &admin, ROLE_ADMIN);
     }
 
-    pub fn configure_fees(env: Env, token: Address, collector: Address, base_fee: i128, enabled: bool) {
+    pub fn configure_fees(
+        env: Env,
+        token: Address,
+        collector: Address,
+        base_fee: i128,
+        enabled: bool,
+    ) {
         dynamic_fees::require_admin(&env);
         assert!(base_fee >= 0, "base_fee must be non-negative");
         let config = FeeConfig { token, collector, base_fee, enabled };
@@ -1210,6 +1226,100 @@ impl AttestationContract {
     pub fn get_disputes_by_attestation(env: Env, business: Address, period: String) -> Vec<u64> {
         get_dispute_ids_by_attestation(&env, &business, &period)
     }
+    // --- Multisig Public Interface ---
+
+    pub fn initialize_multisig(env: Env, owners: Vec<Address>, threshold: u32, _nonce: u64) {
+        multisig::initialize_multisig(&env, &owners, threshold);
+    }
+
+    pub fn create_proposal(
+        env: Env,
+        proposer: Address,
+        action: ProposalAction,
+        _nonce: u64,
+    ) -> u64 {
+        multisig::create_proposal(&env, &proposer, action)
+    }
+
+    pub fn approve_proposal(env: Env, approver: Address, id: u64, _nonce: u64) {
+        multisig::approve_proposal(&env, &approver, id);
+    }
+    pub fn reject_proposal(env: Env, rejecter: Address, id: u64, _nonce: u64) {
+        multisig::reject_proposal(&env, &rejecter, id);
+    }
+
+    pub fn pause(env: Env, _caller: Address, _nonce: u64) {
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "paused"), &true);
+    }
+
+    pub fn is_paused(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&Symbol::new(&env, "paused"))
+            .unwrap_or(false)
+    }
+
+    pub fn execute_proposal(env: Env, caller: Address, id: u64, _nonce: u64) {
+        caller.require_auth();
+        // Updated string here:
+        assert!(
+            multisig::is_owner(&env, &caller),
+            "caller is not a multisig owner"
+        );
+
+        let proposal = multisig::get_proposal(&env, id).expect("proposal not found");
+        multisig::mark_executed(&env, id);
+
+        match proposal.action {
+            ProposalAction::ChangeThreshold(val) => multisig::rotate_threshold(&env, val),
+            ProposalAction::Pause => env
+                .storage()
+                .instance()
+                .set(&soroban_sdk::Symbol::new(&env, "paused"), &true),
+            ProposalAction::Unpause => env
+                .storage()
+                .instance()
+                .set(&soroban_sdk::Symbol::new(&env, "paused"), &false),
+            ProposalAction::AddOwner(addr) => {
+                let mut owners = multisig::get_owners(&env);
+                owners.push_back(addr);
+                multisig::set_owners(&env, &owners);
+            }
+            ProposalAction::RemoveOwner(addr) => {
+                let mut owners = multisig::get_owners(&env);
+                let idx = owners.first_index_of(addr).expect("not owner");
+                owners.remove(idx);
+                multisig::set_owners(&env, &owners);
+            }
+            ProposalAction::GrantRole(addr, role) => access_control::grant_role(&env, &addr, role),
+            _ => panic!("Action not implemented"),
+        }
+    }
+
+    pub fn get_multisig_threshold(env: Env) -> u32 {
+        multisig::get_threshold(&env)
+    }
+
+    pub fn get_multisig_owners(env: Env) -> Vec<Address> {
+        multisig::get_owners(&env)
+    }
+
+    pub fn is_multisig_owner(env: Env, address: Address) -> bool {
+        multisig::is_owner(&env, &address)
+    }
+
+    pub fn get_proposal(env: Env, id: u64) -> Option<Proposal> {
+        multisig::get_proposal(&env, id)
+    }
+
+    pub fn get_approval_count(env: Env, id: u64) -> u32 {
+        multisig::get_approval_count(&env, id)
+    }
+
+    pub fn is_proposal_approved(env: Env, id: u64) -> bool {
+        multisig::is_proposal_approved(&env, id)
 
     /// Configure the sliding-window and burst-window rate limit controls.
     pub fn configure_rate_limit(
@@ -1270,6 +1380,7 @@ impl AttestationContract {
 }
 
 #[cfg(test)]
+mod multisig_test;
 mod test;
 
 #[cfg(test)]
