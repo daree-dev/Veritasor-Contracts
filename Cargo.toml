@@ -3,6 +3,7 @@
 members = [
     "contracts/aggregated-attestations",
     "contracts/attestation",
+    "contracts/attestation-registry",
     "contracts/attestation-snapshot",
     "contracts/attestor-staking",
     "contracts/audit-log",
@@ -15,7 +16,6 @@ members = [
     "contracts/protocol-simulation",
     "contracts/revenue-bonds",
     "contracts/revenue-curve",
-    "contracts/revenue-settlement",
     "contracts/revenue-share",
     "contracts/revenue-stream",
 ]

@@ -45,8 +45,7 @@ struct NetworkConfig {
     network_passphrase: String,            // Stellar network passphrase
     is_active: bool,                       // Whether network is operational
     fee_policy: FeePolicy,                 // Fee configuration
-    allowed_assets: Vec<AssetConfig>,      // Approved assets for attestations
-    contracts: ContractRegistry,           // Related contract addresses
+    contracts: ContractRegistry,           // Related contract addresses (+ presence flags)
     block_time_seconds: u32,               // Average block time
     min_attestations_for_aggregate: u32,   // Min attestations to aggregate
     dispute_timeout_seconds: u64,          // Dispute resolution timeout
@@ -55,6 +54,8 @@ struct NetworkConfig {
     updated_at: u64,                       // Last update timestamp
 }
 ```
+
+Approved assets are **not** embedded in `NetworkConfig`. Register them with `set_asset_config` and read the effective list via `get_allowed_assets` / `get_network_assets` (see [Storage layout](#storage-layout-for-assets-and-versions)).
 
 ### FeePolicy
 
@@ -91,14 +92,22 @@ Addresses of related Veritasor contracts:
 
 ```rust
 struct ContractRegistry {
-    attestation_contract: Option<Address>,
-    revenue_stream_contract: Option<Address>,
-    audit_log_contract: Option<Address>,
-    aggregated_attestations_contract: Option<Address>,
-    integration_registry_contract: Option<Address>,
-    attestation_snapshot_contract: Option<Address>,
+    attestation_contract: Address,
+    revenue_stream_contract: Address,
+    audit_log_contract: Address,
+    aggregated_attestations_contract: Address,
+    integration_registry_contract: Address,
+    attestation_snapshot_contract: Address,
+    has_attestation: bool,
+    has_revenue_stream: bool,
+    has_audit_log: bool,
+    has_aggregated_attestations: bool,
+    has_integration_registry: bool,
+    has_attestation_snapshot: bool,
 }
 ```
+
+`get_contract_address` returns `Some` only when the corresponding `has_*` flag is true. Unused slots still hold an `Address` value but must be ignored when the flag is false.
 
 ## Access Control
 
@@ -279,14 +288,19 @@ stellar contract invoke --id <CONFIG_CONTRACT> -- set_network_config \
       "max_fee": 10000000,
       "min_fee": 100000
     },
-    "allowed_assets": [],
     "contracts": {
       "attestation_contract": "<ATTESTATION_CONTRACT>",
       "revenue_stream_contract": "<REVENUE_CONTRACT>",
       "audit_log_contract": "<AUDIT_CONTRACT>",
       "aggregated_attestations_contract": "<AGGREGATED_CONTRACT>",
       "integration_registry_contract": "<INTEGRATION_CONTRACT>",
-      "attestation_snapshot_contract": "<SNAPSHOT_CONTRACT>"
+      "attestation_snapshot_contract": "<SNAPSHOT_CONTRACT>",
+      "has_attestation": true,
+      "has_revenue_stream": true,
+      "has_audit_log": true,
+      "has_aggregated_attestations": true,
+      "has_integration_registry": true,
+      "has_attestation_snapshot": true
     },
     "block_time_seconds": 5,
     "min_attestations_for_aggregate": 10,
@@ -377,6 +391,25 @@ stellar contract invoke --id <CONFIG_CONTRACT> -- set_network_active \
   --active false
 ```
 
+### 5. Migration rollback (operational)
+
+There is **no** dedicated on-chain rollback function. **Rollback** is performed by governance using the same write APIs:
+
+- **Default network**: call `set_default_network` again to point at a still-active network (you cannot set the default to an inactive network).
+- **Full or partial config**: call `set_network_config`, `update_fee_policy`, or `update_contract_registry` with a previously audited configuration snapshot.
+
+**Version semantics (security / caching assumptions):**
+
+- `get_global_version` increases on every successful governance mutation that the contract defines (including `set_default_network`, fee updates, assets, registry, activation, and full `set_network_config`).
+- `get_network_version(network_id)` increases **only** when that network’s row is written via `set_network_config`, `update_fee_policy`, `update_contract_registry`, or `set_network_active` (not on asset-only updates). Integrators should not assume asset changes bump the per-network version counter.
+- Counters **never decrease**; re-applying an older parameter snapshot restores *values* but not *history*.
+
+While **paused**, all mutators that require an active contract (including rollback attempts) fail; reads continue to work.
+
+### Storage layout for assets and versions
+
+Per-network asset rows use dedicated storage keys (`NetworkAssetConfig`, `NetworkAssetAddresses`) so they do not collide with `NetworkVersion(network_id)`. Asset registration must go through `set_asset_config`; do not rely on embedding assets inside `NetworkConfig`.
+
 ## Integration Guide
 
 ### For Contract Developers
@@ -424,7 +457,7 @@ impl MyContract {
 }
 ```
 
-### Version Tracking
+### Version tracking
 
 Use `get_global_version()` for caching strategies:
 
@@ -489,6 +522,7 @@ The contract includes comprehensive tests covering:
 - **Pause/Unpause**: Role-based permissions, read vs write behavior
 - **Governance**: DAO operations, role transitions
 - **Network Migration**: Testnet to mainnet scenarios, partial migrations
+- **Migration rollback**: Default pointer rollback, re-applying saved `NetworkConfig` / fee policy, monotonic versions, paused and inactive-network failure modes
 - **Edge Cases**: Unknown networks, empty configs, boundary values
 
 **Coverage**: 95%+ line coverage across all modules
@@ -496,15 +530,19 @@ The contract includes comprehensive tests covering:
 ### Running Tests
 
 ```bash
-# Run all network-config tests
+# From repository root (workspace)
+cargo test -p veritasor-network-config
+
+# Or from package directory
 cd contracts/network-config
 cargo test
 
 # Run with output
-cargo test -- --nocapture
+cargo test -p veritasor-network-config -- --nocapture
 
-# Run specific test
-cargo test test_network_migration_scenario -- --nocapture
+# Migration / rollback focused examples
+cargo test -p veritasor-network-config migration_rollback -- --nocapture
+cargo test -p veritasor-network-config rollback -- --nocapture
 ```
 
 ## Deployment Checklist
@@ -556,6 +594,62 @@ cargo test test_network_migration_scenario -- --nocapture
 3. Deactivate network: `set_network_active(network_id, false)`
 4. Update default network if needed: `set_default_network()`
 5. After grace period, remove network: `remove_network(network_id)`
+
+## Business Config: Immutable Anchor Fields
+
+The Business Config contract supports **immutable anchor fields** — the ability to permanently lock individual configuration sections for a business so they can never be modified again.
+
+### AnchorConfig
+
+```rust
+struct AnchorConfig {
+    anomaly_policy_anchored: bool,
+    integrations_anchored: bool,
+    expiry_anchored: bool,
+    custom_fees_anchored: bool,
+    compliance_anchored: bool,
+}
+```
+
+### Behavior
+
+- **One-way lock**: Once a section is anchored (`true`), it cannot be un-anchored. Passing `false` for a previously anchored field is a no-op.
+- **Per-business**: Anchor configurations are independent per business address.
+- **Initial config allowed**: Anchoring fields before any config exists still permits the first `set_business_config` call. Immutability only applies to subsequent updates.
+- **Granular enforcement**: Anchoring one section (e.g., compliance) does not affect updates to other sections (e.g., expiry).
+- **Full and partial updates blocked**: Both `set_business_config` (full replace) and individual `update_*` methods respect anchor locks.
+
+### API
+
+```rust
+/// Lock config sections for a business (admin only, irreversible)
+fn set_anchor_config(env: Env, caller: Address, business: Address, anchor: AnchorConfig)
+
+/// Query current anchor state (returns all-false if unset)
+fn get_anchor_config(env: Env, business: Address) -> AnchorConfig
+```
+
+### Events
+
+| Event      | Topics           | Data         | Description             |
+|------------|------------------|--------------|-------------------------|
+| `anc_set`  | business         | AnchorConfig | Anchor config updated   |
+
+### Example
+
+```bash
+# Lock compliance config permanently for a regulated business
+stellar contract invoke --id <BUSINESS_CONFIG_CONTRACT> -- set_anchor_config \
+  --caller <ADMIN> \
+  --business <BUSINESS> \
+  --anchor '{
+    "anomaly_policy_anchored": false,
+    "integrations_anchored": false,
+    "expiry_anchored": false,
+    "custom_fees_anchored": false,
+    "compliance_anchored": true
+  }'
+```
 
 ## License
 
