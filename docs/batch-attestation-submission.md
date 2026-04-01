@@ -311,3 +311,28 @@ client.submit_attestations_batch(&items);
 
 - [Attestation Dynamic Fees](./attestation-dynamic-fees.md) - Fee calculation details
 - [Attestation Contract README](../README.md) - General contract documentation
+
+## Failure Atomicity — Test Coverage (Issue #127)
+
+### Guarantee
+
+`submit_attestations_batch` enforces **strict all-or-nothing atomicity**:
+if any item fails validation, zero state changes are applied.
+
+### Failure Scenarios Covered
+
+| Test | Conflict Position | Expected Outcome |
+|------|------------------|-----------------|
+| `test_atomicity_failure_at_first_item_rejects_all` | First item | All rejected |
+| `test_atomicity_failure_at_last_item_rejects_all` | Last item | All rejected |
+| `test_atomicity_failure_at_middle_item_rejects_all` | Middle item | All rejected |
+| `test_atomicity_business_count_unchanged_on_failure` | Any failure | Count unchanged |
+| `test_atomicity_in_batch_self_duplicate_rejects_all` | In-batch self-dup | All rejected |
+| `test_atomicity_cross_business_failure_rejects_all` | Cross-business dup | All rejected |
+| `test_atomicity_clean_batch_succeeds_after_failed_batch` | Regression | Clean batch passes |
+
+### Security Assumptions
+
+- Validation always runs **before** the processing phase — no partial commits.
+- Business counts are never incremented on a failed batch.
+- Token fees are never collected on a failed batch.

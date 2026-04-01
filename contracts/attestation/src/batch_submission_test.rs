@@ -791,3 +791,213 @@ fn test_batch_mixed_businesses_and_periods() {
     assert_eq!(client.get_business_count(&business1), 2);
     assert_eq!(client.get_business_count(&business2), 2);
 }
+
+
+// ════════════════════════════════════════════════════════════════════
+//  Failure atomicity tests — Issue #127
+// ════════════════════════════════════════════════════════════════════
+
+/// Atomicity: conflict on the FIRST item — all subsequent items must be rejected.
+#[test]
+fn test_atomicity_failure_at_first_item_rejects_all() {
+    let (env, client) = setup();
+    let business = Address::generate(&env);
+
+    client.submit_attestation(
+        &business,
+        &String::from_str(&env, "2026-01"),
+        &BytesN::from_array(&env, &[1u8; 32]),
+        &1_700_000_000,
+        &1,
+        &None,
+    );
+
+    let mut items = Vec::new(&env);
+    items.push_back(create_batch_item(&env, &business, "2026-01", &[9u8; 32], 1_700_000_001, 1));
+    items.push_back(create_batch_item(&env, &business, "2026-02", &[2u8; 32], 1_700_008_640, 1));
+    items.push_back(create_batch_item(&env, &business, "2026-03", &[3u8; 32], 1_700_017_280, 1));
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.submit_attestations_batch(&items);
+    }));
+
+    assert!(result.is_err(), "batch must panic on first-item conflict");
+    assert!(client.get_attestation(&business, &String::from_str(&env, "2026-02")).is_none());
+    assert!(client.get_attestation(&business, &String::from_str(&env, "2026-03")).is_none());
+    assert_eq!(client.get_business_count(&business), 1);
+}
+
+/// Atomicity: conflict on the LAST item — earlier items must NOT be persisted.
+#[test]
+fn test_atomicity_failure_at_last_item_rejects_all() {
+    let (env, client) = setup();
+    let business = Address::generate(&env);
+
+    client.submit_attestation(
+        &business,
+        &String::from_str(&env, "2026-03"),
+        &BytesN::from_array(&env, &[3u8; 32]),
+        &1_700_017_280,
+        &1,
+        &None,
+    );
+
+    let mut items = Vec::new(&env);
+    items.push_back(create_batch_item(&env, &business, "2026-01", &[1u8; 32], 1_700_000_000, 1));
+    items.push_back(create_batch_item(&env, &business, "2026-02", &[2u8; 32], 1_700_008_640, 1));
+    items.push_back(create_batch_item(&env, &business, "2026-03", &[9u8; 32], 1_700_017_281, 1));
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.submit_attestations_batch(&items);
+    }));
+
+    assert!(result.is_err(), "batch must panic on last-item conflict");
+    assert!(client.get_attestation(&business, &String::from_str(&env, "2026-01")).is_none());
+    assert!(client.get_attestation(&business, &String::from_str(&env, "2026-02")).is_none());
+    assert_eq!(client.get_business_count(&business), 1);
+}
+
+/// Atomicity: conflict on a MIDDLE item — items before and after must NOT be stored.
+#[test]
+fn test_atomicity_failure_at_middle_item_rejects_all() {
+    let (env, client) = setup();
+    let business = Address::generate(&env);
+
+    client.submit_attestation(
+        &business,
+        &String::from_str(&env, "2026-02"),
+        &BytesN::from_array(&env, &[2u8; 32]),
+        &1_700_008_640,
+        &1,
+        &None,
+    );
+
+    let mut items = Vec::new(&env);
+    items.push_back(create_batch_item(&env, &business, "2026-01", &[1u8; 32], 1_700_000_000, 1));
+    items.push_back(create_batch_item(&env, &business, "2026-02", &[9u8; 32], 1_700_008_641, 1));
+    items.push_back(create_batch_item(&env, &business, "2026-03", &[3u8; 32], 1_700_017_280, 1));
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.submit_attestations_batch(&items);
+    }));
+
+    assert!(result.is_err(), "batch must panic on middle-item conflict");
+    assert!(client.get_attestation(&business, &String::from_str(&env, "2026-01")).is_none());
+    assert!(client.get_attestation(&business, &String::from_str(&env, "2026-03")).is_none());
+    assert_eq!(client.get_business_count(&business), 1);
+}
+
+/// Atomicity: business count must NOT increment when the batch fails.
+#[test]
+fn test_atomicity_business_count_unchanged_on_failure() {
+    let (env, client) = setup();
+    let business = Address::generate(&env);
+
+    for i in 1u8..=3 {
+        client.submit_attestation(
+            &business,
+            &String::from_str(&env, &std::format!("2025-{:02}", i)),
+            &BytesN::from_array(&env, &[i; 32]),
+            &1_700_000_000,
+            &1,
+            &None,
+        );
+    }
+    assert_eq!(client.get_business_count(&business), 3);
+
+    let mut items = Vec::new(&env);
+    items.push_back(create_batch_item(&env, &business, "2026-01", &[10u8; 32], 1_700_000_000, 1));
+    items.push_back(create_batch_item(&env, &business, "2025-01", &[11u8; 32], 1_700_000_001, 1));
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.submit_attestations_batch(&items);
+    }));
+
+    assert!(result.is_err());
+    assert_eq!(client.get_business_count(&business), 3);
+}
+
+/// Atomicity: in-batch self-duplicate must reject the entire batch.
+#[test]
+fn test_atomicity_in_batch_self_duplicate_rejects_all() {
+    let (env, client) = setup();
+    let business = Address::generate(&env);
+
+    let mut items = Vec::new(&env);
+    items.push_back(create_batch_item(&env, &business, "2026-01", &[1u8; 32], 1_700_000_000, 1));
+    items.push_back(create_batch_item(&env, &business, "2026-02", &[2u8; 32], 1_700_008_640, 1));
+    items.push_back(create_batch_item(&env, &business, "2026-01", &[3u8; 32], 1_700_000_001, 1));
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.submit_attestations_batch(&items);
+    }));
+
+    assert!(result.is_err(), "self-duplicate must reject batch");
+    assert!(client.get_attestation(&business, &String::from_str(&env, "2026-01")).is_none());
+    assert!(client.get_attestation(&business, &String::from_str(&env, "2026-02")).is_none());
+    assert_eq!(client.get_business_count(&business), 0);
+}
+
+/// Atomicity: one bad cross-business entry rejects the entire multi-business batch.
+#[test]
+fn test_atomicity_cross_business_failure_rejects_all() {
+    let (env, client) = setup();
+    let business1 = Address::generate(&env);
+    let business2 = Address::generate(&env);
+
+    client.submit_attestation(
+        &business2,
+        &String::from_str(&env, "2026-01"),
+        &BytesN::from_array(&env, &[2u8; 32]),
+        &1_700_000_000,
+        &1,
+        &None,
+    );
+
+    let mut items = Vec::new(&env);
+    items.push_back(create_batch_item(&env, &business1, "2026-01", &[1u8; 32], 1_700_000_000, 1));
+    items.push_back(create_batch_item(&env, &business1, "2026-02", &[5u8; 32], 1_700_008_640, 1));
+    items.push_back(create_batch_item(&env, &business2, "2026-01", &[9u8; 32], 1_700_000_001, 1));
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.submit_attestations_batch(&items);
+    }));
+
+    assert!(result.is_err(), "cross-business duplicate must reject all");
+    assert!(client.get_attestation(&business1, &String::from_str(&env, "2026-01")).is_none());
+    assert!(client.get_attestation(&business1, &String::from_str(&env, "2026-02")).is_none());
+    assert_eq!(client.get_business_count(&business1), 0);
+    assert_eq!(client.get_business_count(&business2), 1);
+}
+
+/// Regression: a clean batch succeeds normally after a prior failed batch.
+#[test]
+fn test_atomicity_clean_batch_succeeds_after_failed_batch() {
+    let (env, client) = setup();
+    let business = Address::generate(&env);
+
+    client.submit_attestation(
+        &business,
+        &String::from_str(&env, "2026-01"),
+        &BytesN::from_array(&env, &[1u8; 32]),
+        &1_700_000_000,
+        &1,
+        &None,
+    );
+
+    let mut bad_items = Vec::new(&env);
+    bad_items.push_back(create_batch_item(&env, &business, "2026-01", &[9u8; 32], 1_700_000_001, 1));
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.submit_attestations_batch(&bad_items);
+    }));
+
+    let mut good_items = Vec::new(&env);
+    good_items.push_back(create_batch_item(&env, &business, "2026-02", &[2u8; 32], 1_700_008_640, 1));
+    good_items.push_back(create_batch_item(&env, &business, "2026-03", &[3u8; 32], 1_700_017_280, 1));
+
+    client.submit_attestations_batch(&good_items);
+
+    assert!(client.get_attestation(&business, &String::from_str(&env, "2026-02")).is_some());
+    assert!(client.get_attestation(&business, &String::from_str(&env, "2026-03")).is_some());
+    assert_eq!(client.get_business_count(&business), 3);
+}

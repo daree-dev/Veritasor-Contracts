@@ -118,6 +118,18 @@ pub enum MultiPeriodKey {
 }
 
 #[contract]
+
+/// A single item in a batch attestation submission.
+#[contracttype]
+pub struct BatchAttestationItem {
+    pub business: Address,
+    pub period: String,
+    pub merkle_root: BytesN<32>,
+    pub timestamp: u64,
+    pub version: u32,
+    pub expiry_timestamp: Option<u64>,
+}
+
 pub struct AttestationContract;
 
 /// Lexicographic comparison of Soroban strings.
