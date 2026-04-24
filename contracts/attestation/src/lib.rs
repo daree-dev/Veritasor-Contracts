@@ -905,7 +905,45 @@ impl AttestationContract {
             panic!("attestation root not found");
         }
 
+    /// Calculate a canonical commitment hash for an attestation.
+    ///
+    /// This commitment binds the business, period, merkle root, and version
+    /// into a single SHA-256 hash. Off-chain systems should use this hash
+    /// to ensure that a proof bundle is uniquely tied to a specific on-chain
+    /// attestation record, preventing forgery or reuse across periods.
+    ///
+    /// # Arguments
+    ///
+    /// * `business`    – The business address.
+    /// * `period`      – The attestation period string.
+    /// * `merkle_root` – The 32-byte Merkle root hash.
+    /// * `version`     – The schema version.
+    pub fn compute_commitment(
+        env: Env,
+        business: Address,
+        period: String,
+        merkle_root: BytesN<32>,
+        version: u32,
+    ) -> BytesN<32> {
+        let mut buf = soroban_sdk::Bytes::new(&env);
+        
+        // Canonical encoding: [Business XDR] | [Period XDR] | [Root Bytes] | [Version BE]
+        buf.append(&business.to_xdr(&env));
+        buf.append(&period.to_xdr(&env));
+        buf.append(&merkle_root.to_xdr(&env));
+        
+        // Use big-endian for version to ensure stability across architectures
+        let mut ver_buf = [0u8; 4];
+        for (i, byte) in version.to_be_bytes().iter().enumerate() {
+            ver_buf[i] = *byte;
+        }
+        buf.append(&soroban_sdk::Bytes::from_array(&env, &ver_buf));
+
+        env.crypto().sha256(&buf)
+    }
+
     /// Return the current flat fee configuration, or None if not set.
+
     pub fn get_flat_fee_config(env: Env) -> Option<FlatFeeConfig> {
         fees::get_flat_fee_config(&env)
     }
