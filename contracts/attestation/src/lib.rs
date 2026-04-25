@@ -1108,3 +1108,87 @@ impl AttestationContract {
         dispute::get_dispute(&env, dispute_id)
     }
 }
+
+#[contractimpl]
+impl AttestationContract {
+    pub fn initialize_multisig(env: Env, owners: Vec<Address>, threshold: u32) {
+        multisig::initialize_multisig(&env, &owners, threshold);
+    }
+
+    pub fn create_proposal(env: Env, proposer: Address, action: ProposalAction) -> u64 {
+        multisig::create_proposal(&env, &proposer, action)
+    }
+
+    pub fn approve_proposal(env: Env, approver: Address, id: u64) {
+        multisig::approve_proposal(&env, &approver, id);
+    }
+
+    pub fn reject_proposal(env: Env, rejecter: Address, id: u64) {
+        multisig::reject_proposal(&env, &rejecter, id);
+    }
+
+    pub fn execute_proposal(env: Env, id: u64) {
+        multisig::mark_executed(&env, id);
+        let proposal = multisig::get_proposal(&env, id).unwrap();
+        match proposal.action {
+            ProposalAction::Pause => {
+                access_control::set_paused(&env, true);
+            }
+            ProposalAction::Unpause => {
+                access_control::set_paused(&env, false);
+            }
+            ProposalAction::AddOwner(address) => {
+                let mut owners = multisig::get_owners(&env);
+                owners.push_back(address);
+                multisig::set_owners(&env, &owners);
+            }
+            ProposalAction::RemoveOwner(address) => {
+                let mut owners = multisig::get_owners(&env);
+                let index = owners.first_index_of(&address).expect("not an owner");
+                owners.remove(index);
+                multisig::set_owners(&env, &owners);
+            }
+            ProposalAction::ChangeThreshold(threshold) => {
+                multisig::rotate_threshold(&env, threshold);
+            }
+            ProposalAction::GrantRole(address, role) => {
+                access_control::grant_role(&env, &address, role);
+            }
+            ProposalAction::RevokeRole(address, role) => {
+                access_control::revoke_role(&env, &address, role);
+            }
+            ProposalAction::UpdateFeeConfig(token, collector, base_fee, enabled) => {
+                let config = dynamic_fees::FeeConfig { token, collector, base_fee, enabled };
+                dynamic_fees::set_fee_config(&env, &config);
+            }
+            ProposalAction::EmergencyRotateAdmin(address) => {
+                dynamic_fees::set_admin(&env, &address);
+            }
+        }
+    }
+
+    pub fn get_proposal(env: Env, id: u64) -> Option<Proposal> {
+        multisig::get_proposal(&env, id)
+    }
+
+    pub fn get_approval_count(env: Env, id: u64) -> u32 {
+        multisig::get_approval_count(&env, id)
+    }
+
+    pub fn is_proposal_approved(env: Env, id: u64) -> bool {
+        multisig::is_proposal_approved(&env, id)
+    }
+
+    pub fn get_multisig_owners(env: Env) -> Vec<Address> {
+        multisig::get_owners(&env)
+    }
+
+    pub fn get_multisig_threshold(env: Env) -> u32 {
+        multisig::get_threshold(&env)
+    }
+
+    pub fn is_multisig_owner(env: Env, address: Address) -> bool {
+        multisig::is_owner(&env, &address)
+    }
+}
+
