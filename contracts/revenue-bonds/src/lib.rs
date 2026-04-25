@@ -72,6 +72,10 @@ mod attestation_import {
 
 #[cfg(test)]
 mod test;
+#[cfg(test)]
+mod test_maturity;
+#[cfg(test)]
+mod test_hybrid_volatility;
 
 #[contracttype]
 #[derive(Clone, Debug)]

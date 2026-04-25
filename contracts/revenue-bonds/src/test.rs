@@ -225,6 +225,7 @@ fn test_redeem_fixed_bond() {
 
     client.initialize(&admin);
 
+    let issue_period = String::from_str(&env, "2026-01");
     let bond_id = client.issue_bond(
         &issuer,
         &owner,
@@ -234,6 +235,7 @@ fn test_redeem_fixed_bond() {
         &500_000,
         &500_000,
         &12,
+        &issue_period,
         &attestation_contract,
         &token,
     );
@@ -254,6 +256,7 @@ fn test_redeem_revenue_linked_bond() {
 
     client.initialize(&admin);
 
+    let issue_period = String::from_str(&env, "2026-01");
     let bond_id = client.issue_bond(
         &issuer,
         &owner,
@@ -263,6 +266,7 @@ fn test_redeem_revenue_linked_bond() {
         &100_000,
         &1_000_000,
         &24,
+        &issue_period,
         &attestation_contract,
         &token,
     );
@@ -282,6 +286,7 @@ fn test_redeem_revenue_linked_below_minimum() {
 
     client.initialize(&admin);
 
+    let issue_period = String::from_str(&env, "2026-01");
     let bond_id = client.issue_bond(
         &issuer,
         &owner,
@@ -291,6 +296,7 @@ fn test_redeem_revenue_linked_below_minimum() {
         &100_000,
         &1_000_000,
         &24,
+        &issue_period,
         &attestation_contract,
         &token,
     );
@@ -310,6 +316,7 @@ fn test_redeem_revenue_linked_capped_at_max() {
 
     client.initialize(&admin);
 
+    let issue_period = String::from_str(&env, "2026-01");
     let bond_id = client.issue_bond(
         &issuer,
         &owner,
@@ -319,6 +326,7 @@ fn test_redeem_revenue_linked_capped_at_max() {
         &100_000,
         &1_000_000,
         &24,
+        &issue_period,
         &attestation_contract,
         &token,
     );
@@ -338,6 +346,7 @@ fn test_redeem_hybrid_bond() {
 
     client.initialize(&admin);
 
+    let issue_period = String::from_str(&env, "2026-01");
     let bond_id = client.issue_bond(
         &issuer,
         &owner,
@@ -347,6 +356,7 @@ fn test_redeem_hybrid_bond() {
         &200_000,
         &800_000,
         &18,
+        &issue_period,
         &attestation_contract,
         &token,
     );
@@ -367,6 +377,7 @@ fn test_redeem_double_spending_prevention() {
 
     client.initialize(&admin);
 
+    let issue_period = String::from_str(&env, "2026-01");
     let bond_id = client.issue_bond(
         &issuer,
         &owner,
@@ -376,6 +387,7 @@ fn test_redeem_double_spending_prevention() {
         &500_000,
         &500_000,
         &12,
+        &issue_period,
         &attestation_contract,
         &token,
     );
@@ -393,6 +405,7 @@ fn test_multiple_period_redemptions() {
 
     client.initialize(&admin);
 
+    let issue_period = String::from_str(&env, "2026-01");
     let bond_id = client.issue_bond(
         &issuer,
         &owner,
@@ -402,6 +415,7 @@ fn test_multiple_period_redemptions() {
         &500_000,
         &500_000,
         &12,
+        &issue_period,
         &attestation_contract,
         &token,
     );
@@ -418,17 +432,18 @@ fn test_multiple_period_redemptions() {
     assert_eq!(client.get_remaining_value(&bond_id), 8_500_000);
 }
 
-/// Maturity is currently informational only. Redemptions continue if the bond
-/// is still active and has remaining face value, even when periods drift past
-/// the configured maturity window.
+/// Maturity is enforced: redemptions within the window succeed across all
+/// periods up to and including the last valid one.
 #[test]
-fn test_redemption_continues_after_maturity_period_drift() {
+fn test_redemption_continues_within_maturity_window() {
     let (env, admin, issuer, owner, token, attestation_contract, _) = setup_test();
     let contract_id = env.register(RevenueBondContract, ());
     let client = RevenueBondContractClient::new(&env, &contract_id);
 
     client.initialize(&admin);
 
+    // maturity_periods=3 covers 2026-01, 2026-02, 2026-03
+    let issue_period = String::from_str(&env, "2026-01");
     let bond_id = client.issue_bond(
         &issuer,
         &owner,
@@ -437,7 +452,8 @@ fn test_redemption_continues_after_maturity_period_drift() {
         &0,
         &500_000,
         &500_000,
-        &2,
+        &3,
+        &issue_period,
         &attestation_contract,
         &token,
     );
@@ -469,6 +485,7 @@ fn test_redemption_allows_out_of_order_period_drift() {
 
     client.initialize(&admin);
 
+    let issue_period = String::from_str(&env, "2026-01");
     let bond_id = client.issue_bond(
         &issuer,
         &owner,
@@ -478,6 +495,7 @@ fn test_redemption_allows_out_of_order_period_drift() {
         &500_000,
         &500_000,
         &12,
+        &issue_period,
         &attestation_contract,
         &token,
     );
@@ -504,6 +522,7 @@ fn test_full_redemption() {
 
     client.initialize(&admin);
 
+    let issue_period = String::from_str(&env, "2026-01");
     let bond_id = client.issue_bond(
         &issuer,
         &owner,
@@ -513,6 +532,7 @@ fn test_full_redemption() {
         &500_000,
         &500_000,
         &12,
+        &issue_period,
         &attestation_contract,
         &token,
     );
@@ -537,6 +557,7 @@ fn test_partial_redemption_caps_at_face_value() {
 
     client.initialize(&admin);
 
+    let issue_period = String::from_str(&env, "2026-01");
     let bond_id = client.issue_bond(
         &issuer,
         &owner,
@@ -546,6 +567,7 @@ fn test_partial_redemption_caps_at_face_value() {
         &500_000,
         &500_000,
         &12,
+        &issue_period,
         &attestation_contract,
         &token,
     );
@@ -575,6 +597,7 @@ fn test_transfer_ownership() {
     let token = Address::generate(&env);
     let attestation_contract = Address::generate(&env);
 
+    let issue_period = String::from_str(&env, "2026-01");
     let bond_id = client.issue_bond(
         &issuer,
         &owner,
@@ -584,6 +607,7 @@ fn test_transfer_ownership() {
         &500_000,
         &500_000,
         &12,
+        &issue_period,
         &attestation_contract,
         &token,
     );
@@ -606,6 +630,7 @@ fn test_transfer_ownership_unauthorized() {
     let token = Address::generate(&env);
     let attestation_contract = Address::generate(&env);
 
+    let issue_period = String::from_str(&env, "2026-01");
     let bond_id = client.issue_bond(
         &issuer,
         &owner,
@@ -615,6 +640,7 @@ fn test_transfer_ownership_unauthorized() {
         &500_000,
         &500_000,
         &12,
+        &issue_period,
         &attestation_contract,
         &token,
     );
@@ -630,6 +656,7 @@ fn test_mark_defaulted() {
 
     client.initialize(&admin);
 
+    let issue_period = String::from_str(&env, "2026-01");
     let bond_id = client.issue_bond(
         &issuer,
         &owner,
@@ -639,6 +666,7 @@ fn test_mark_defaulted() {
         &500_000,
         &500_000,
         &12,
+        &issue_period,
         &attestation_contract,
         &token,
     );
@@ -658,6 +686,7 @@ fn test_mark_defaulted_unauthorized() {
 
     client.initialize(&admin);
 
+    let issue_period = String::from_str(&env, "2026-01");
     let bond_id = client.issue_bond(
         &issuer,
         &owner,
@@ -667,6 +696,7 @@ fn test_mark_defaulted_unauthorized() {
         &500_000,
         &500_000,
         &12,
+        &issue_period,
         &attestation_contract,
         &token,
     );
@@ -684,6 +714,7 @@ fn test_redeem_defaulted_bond() {
 
     client.initialize(&admin);
 
+    let issue_period = String::from_str(&env, "2026-01");
     let bond_id = client.issue_bond(
         &issuer,
         &owner,
@@ -693,6 +724,7 @@ fn test_redeem_defaulted_bond() {
         &500_000,
         &500_000,
         &12,
+        &issue_period,
         &attestation_contract,
         &token,
     );
@@ -711,6 +743,7 @@ fn test_early_redemption_scenario() {
 
     client.initialize(&admin);
 
+    let issue_period = String::from_str(&env, "2026-01");
     let bond_id = client.issue_bond(
         &issuer,
         &owner,
@@ -720,6 +753,7 @@ fn test_early_redemption_scenario() {
         &100_000,
         &2_000_000,
         &24,
+        &issue_period,
         &attestation_contract,
         &token,
     );
