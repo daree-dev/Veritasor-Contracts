@@ -68,7 +68,6 @@ fn test_issue_bond_fixed_structure() {
 
     client.initialize(&admin);
 
-let issue_period = String::from_str(&env, "2026-01");
     let bond_id = client.issue_bond(
         &issuer,
         &owner,
@@ -78,7 +77,6 @@ let issue_period = String::from_str(&env, "2026-01");
         &500_000,
         &500_000,
         &12,
-        &issue_period,
         &attestation_contract,
         &token,
     );
@@ -98,7 +96,6 @@ fn test_issue_bond_revenue_linked() {
 
     client.initialize(&admin);
 
-let issue_period = String::from_str(&env, "2026-01");
     let bond_id = client.issue_bond(
         &issuer,
         &owner,
@@ -108,7 +105,6 @@ let issue_period = String::from_str(&env, "2026-01");
         &100_000,
         &1_000_000,
         &24,
-        &issue_period,
         &attestation_contract,
         &token,
     );
@@ -126,7 +122,6 @@ fn test_issue_bond_hybrid() {
 
     client.initialize(&admin);
 
-let issue_period = String::from_str(&env, "2026-01");
     let bond_id = client.issue_bond(
         &issuer,
         &owner,
@@ -136,7 +131,6 @@ let issue_period = String::from_str(&env, "2026-01");
         &200_000,
         &800_000,
         &18,
-        &issue_period,
         &attestation_contract,
         &token,
     );
@@ -153,7 +147,6 @@ fn test_issue_bond_invalid_face_value() {
     let client = RevenueBondContractClient::new(&env, &contract_id);
 
     client.initialize(&admin);
-let issue_period = String::from_str(&env, "2026-01");
     client.issue_bond(
         &issuer,
         &owner,
@@ -163,7 +156,6 @@ let issue_period = String::from_str(&env, "2026-01");
         &500_000,
         &500_000,
         &12,
-        &issue_period,
         &attestation_contract,
         &token,
     );
@@ -177,7 +169,6 @@ fn test_issue_bond_invalid_revenue_share() {
     let client = RevenueBondContractClient::new(&env, &contract_id);
 
     client.initialize(&admin);
-let issue_period = String::from_str(&env, "2026-01");
     client.issue_bond(
         &issuer,
         &owner,
@@ -187,7 +178,6 @@ let issue_period = String::from_str(&env, "2026-01");
         &100_000,
         &1_000_000,
         &12,
-        &issue_period,
         &attestation_contract,
         &token,
     );
@@ -201,7 +191,6 @@ fn test_issue_bond_invalid_payment_range() {
     let client = RevenueBondContractClient::new(&env, &contract_id);
 
     client.initialize(&admin);
-let issue_period = String::from_str(&env, "2026-01");
     client.issue_bond(
         &issuer,
         &owner,
@@ -211,7 +200,28 @@ let issue_period = String::from_str(&env, "2026-01");
         &1_000_000,
         &500_000,
         &12,
-        &issue_period,
+        &attestation_contract,
+        &token,
+    );
+}
+
+#[test]
+#[should_panic(expected = "issuer and owner must differ")]
+fn test_issue_bond_rejects_same_issuer_and_owner() {
+    let (env, admin, issuer, _, token, attestation_contract, _) = setup_test();
+    let contract_id = env.register(RevenueBondContract, ());
+    let client = RevenueBondContractClient::new(&env, &contract_id);
+
+    client.initialize(&admin);
+    client.issue_bond(
+        &issuer,
+        &issuer,
+        &10_000_000,
+        &BondStructure::Fixed,
+        &0,
+        &500_000,
+        &500_000,
+        &12,
         &attestation_contract,
         &token,
     );
@@ -356,6 +366,32 @@ fn test_redeem_hybrid_bond() {
 
     let redemption = client.get_redemption(&bond_id, &period).unwrap();
     assert_eq!(redemption.redemption_amount, 700_000);
+}
+
+#[test]
+#[should_panic(expected = "attested_revenue must be non-negative")]
+fn test_redeem_rejects_negative_attested_revenue() {
+    let (env, admin, issuer, owner, token, attestation_contract, _) = setup_test();
+    let contract_id = env.register(RevenueBondContract, ());
+    let client = RevenueBondContractClient::new(&env, &contract_id);
+
+    client.initialize(&admin);
+
+    let bond_id = client.issue_bond(
+        &issuer,
+        &owner,
+        &10_000_000,
+        &BondStructure::Fixed,
+        &0,
+        &500_000,
+        &500_000,
+        &12,
+        &attestation_contract,
+        &token,
+    );
+
+    let period = String::from_str(&env, "2026-02");
+    client.redeem(&bond_id, &period, &-1);
 }
 
 #[test]
@@ -673,6 +709,58 @@ fn test_mark_defaulted_unauthorized() {
 
     let non_admin = Address::generate(&env);
     client.mark_defaulted(&non_admin, &bond_id);
+}
+
+#[test]
+fn test_mark_matured() {
+    let (env, admin, issuer, owner, token, attestation_contract, _) = setup_test();
+    let contract_id = env.register(RevenueBondContract, ());
+    let client = RevenueBondContractClient::new(&env, &contract_id);
+
+    client.initialize(&admin);
+
+    let bond_id = client.issue_bond(
+        &issuer,
+        &owner,
+        &10_000_000,
+        &BondStructure::Fixed,
+        &0,
+        &500_000,
+        &500_000,
+        &12,
+        &attestation_contract,
+        &token,
+    );
+
+    client.mark_matured(&admin, &bond_id);
+    let bond = client.get_bond(&bond_id).unwrap();
+    assert_eq!(bond.status, BondStatus::Matured);
+}
+
+#[test]
+#[should_panic(expected = "unauthorized")]
+fn test_mark_matured_unauthorized() {
+    let (env, admin, issuer, owner, token, attestation_contract, _) = setup_test();
+    let contract_id = env.register(RevenueBondContract, ());
+    let client = RevenueBondContractClient::new(&env, &contract_id);
+
+    client.initialize(&admin);
+
+    let bond_id = client.issue_bond(
+        &issuer,
+        &owner,
+        &10_000_000,
+        &BondStructure::Fixed,
+        &0,
+        &500_000,
+        &500_000,
+        &12,
+        &attestation_contract,
+        &token,
+    );
+
+    let non_admin = Address::generate(&env);
+    client.mark_matured(&non_admin, &bond_id);
 }
 
 #[test]
