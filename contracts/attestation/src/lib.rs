@@ -1,8 +1,9 @@
 #![no_std]
-use soroban_sdk::{contract, contractimpl, contracttype, Address, BytesN, Env, String, Vec};
+#![allow(clippy::too_many_arguments)]
 
-// Use the crate client directly for both wasm32 and host builds
+use soroban_sdk::{contract, contractimpl, contracttype, Address, BytesN, Env, String, Symbol, Vec};
 use veritasor_attestor_staking::AttestorStakingContractClient;
+use veritasor_common::replay_protection;
 
 const STATUS_KEY_TAG: u32 = 1;
 const ADMIN_KEY_TAG: (u32,) = (2,);
@@ -16,22 +17,13 @@ pub const STATUS_ACTIVE: u32 = 0;
 pub const STATUS_REVOKED: u32 = 1;
 
 // Type aliases to reduce complexity - exported for other contracts
-pub type AttestationData = (BytesN<32>, u64, u32, i128, Option<u64>);
-#![allow(clippy::too_many_arguments)]
-use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, String, Symbol, Vec};
-
-// Type aliases to reduce complexity - exported for other contracts
 pub type AttestationData = (BytesN<32>, u64, u32, i128, Option<BytesN<32>>, Option<u64>);
 pub type RevocationData = (Address, u64, String);
 pub type AttestationWithRevocation = (AttestationData, Option<RevocationData>);
 pub type AttestationStatusResult = Vec<(String, Option<AttestationData>, Option<RevocationData>)>;
-use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, String, Vec};
-use veritasor_common::replay_protection;
 
 // ─── Feature modules: add new `pub mod <name>;` here (one per feature) ───
 pub mod access_control;
-use soroban_sdk::{contract, contractimpl, contracttype, Address, BytesN, Env, String, Vec};
-
 pub mod dynamic_fees;
 pub mod events;
 pub mod extended_metadata;
@@ -56,7 +48,6 @@ pub use multisig::{Proposal, ProposalAction, ProposalStatus};
 pub use rate_limit::RateLimitConfig;
 pub use registry::{BusinessRecord, BusinessStatus};
 // ─── End re-exports ───
-pub use dynamic_fees::{compute_fee, DataKey, FeeConfig};
 
 #[cfg(test)]
 mod test;
@@ -69,8 +60,6 @@ mod attestor_staking_integration_test;
 #[cfg(test)]
 mod batch_submission_test;
 #[cfg(test)]
-mod dispute_test;
-#[cfg(test)]
 mod dynamic_fees_test;
 #[cfg(test)]
 mod events_test;
@@ -81,11 +70,9 @@ mod multisig_test;
 #[cfg(test)]
 mod proof_hash_test;
 #[cfg(test)]
-mod rate_limit_test;
+mod registry_test;
 #[cfg(test)]
 mod revocation_test;
-#[cfg(test)]
-mod test;
 // ─── End test modules ───
 
 pub mod dispute;
@@ -95,9 +82,8 @@ use dispute::{
     validate_dispute_closure, validate_dispute_eligibility, validate_dispute_resolution, Dispute,
     DisputeOutcome, DisputeResolution, DisputeStatus, DisputeType, OptionalResolution,
 };
+
 #[cfg(test)]
-mod registry_test;
-mod test;
 mod multi_period_test; 
 
 #[contracttype]
@@ -306,16 +292,14 @@ impl AttestationContract {
         // Track volume for future discount calculations.
         dynamic_fees::increment_business_count(&env, &business);
 
-        let data: AttestationData = (
+        let data = (
             merkle_root.clone(),
             timestamp,
             version,
-            fee_paid,
+            total_fee,
             proof_hash.clone(),
             expiry_timestamp,
-            false, // not revoked
         );
-        let data = (merkle_root.clone(), timestamp, version, total_fee);
         env.storage().instance().set(&key, &data);
 
         // Emit event
@@ -326,10 +310,9 @@ impl AttestationContract {
             &merkle_root,
             timestamp,
             version,
-            fee_paid,
+            total_fee,
             &proof_hash,
             expiry_timestamp,
-            total_fee,
         );
 
         rate_limit::record_submission(&env, &business);
@@ -351,6 +334,139 @@ impl AttestationContract {
     ) {
         access_control::require_not_paused(&env);
         access_control::require_attestor(&env, &attestor);
+        attestor.require_auth();
+
+        // Verify attestor meets minimum stake requirement
+        let staking_contract: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::AttestorStakingContract)
+            .expect("attestor staking contract not configured");
+        
+        let staking_client = AttestorStakingContractClient::new(&env, &staking_contract);
+        if !staking_client.is_eligible(&attestor) {
+            panic!("attestor does not meet minimum stake requirement");
+        }
+
+        // Validate and store attestation
+        let key = DataKey::Attestation(business.clone(), period.clone());
+        if env.storage().instance().has(&key) {
+            panic!("attestation already exists for this business and period");
+        }
+        Self::validate_expiry(&env, timestamp, expiry_timestamp);
+
+        // Collect fees (paid by attestor in this flow)
+        let dynamic_fee = dynamic_fees::collect_fee(&env, &attestor);
+        let flat_fee = fees::collect_flat_fee(&env, &attestor);
+        let total_fee = dynamic_fee + flat_fee;
+
+        // Track volume for future discount calculations
+        dynamic_fees::increment_business_count(&env, &attestor);
+
+        let data = (
+            merkle_root.clone(),
+            timestamp,
+            version,
+            total_fee,
+            None::<BytesN<32>>, // proof_hash
+            expiry_timestamp,
+        );
+        env.storage().instance().set(&key, &data);
+
+        // Emit event
+        events::emit_attestation_submitted(
+            &env,
+            &business,
+            &period,
+            &merkle_root,
+            timestamp,
+            version,
+            total_fee,
+            &None::<BytesN<32>>,
+            expiry_timestamp,
+        );
+    }
+
+    /// Submit a batch of attestations as an attestor.
+    ///
+    /// The caller must hold `ROLE_ATTESTOR` and meet the minimum stake requirement
+    /// in the configured attestor staking contract. All attestations in the batch
+    /// are submitted atomically - if any fails, none are stored.
+    pub fn submit_batch_as_attestor(
+        env: Env,
+        attestor: Address,
+        items: Vec<BatchAttestationItem>,
+    ) {
+        access_control::require_not_paused(&env);
+        access_control::require_attestor(&env, &attestor);
+        attestor.require_auth();
+
+        assert!(!items.is_empty(), "batch cannot be empty");
+
+        // Verify attestor meets minimum stake requirement
+        let staking_contract: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::AttestorStakingContract)
+            .expect("attestor staking contract not configured");
+        
+        let staking_client = AttestorStakingContractClient::new(&env, &staking_contract);
+        if !staking_client.is_eligible(&attestor) {
+            panic!("attestor does not meet minimum stake requirement");
+        }
+
+        // Check for duplicates within batch and existing attestations
+        for i in 0..items.len() {
+            let item = items.get(i).unwrap();
+            // Check against existing attestations
+            if env.storage().instance().has(&DataKey::Attestation(item.business.clone(), item.period.clone())) {
+                panic!("attestation already exists for this business and period");
+            }
+            // Check for duplicates within batch
+            for j in (i + 1)..items.len() {
+                let other = items.get(j).unwrap();
+                if item.business == other.business && item.period == other.period {
+                    panic!("duplicate attestation in batch");
+                }
+            }
+        }
+
+        // Submit all attestations
+        for item in items.iter() {
+            Self::validate_expiry(&env, item.timestamp, item.expiry_timestamp);
+
+            let dynamic_fee = dynamic_fees::collect_fee(&env, &attestor);
+            let flat_fee = fees::collect_flat_fee(&env, &attestor);
+            let total_fee = dynamic_fee + flat_fee;
+
+            dynamic_fees::increment_business_count(&env, &attestor);
+
+            let data = (
+                item.merkle_root.clone(),
+                item.timestamp,
+                item.version,
+                total_fee,
+                None::<BytesN<32>>,
+                item.expiry_timestamp,
+            );
+            env.storage().instance().set(
+                &DataKey::Attestation(item.business.clone(), item.period.clone()),
+                &data,
+            );
+
+            events::emit_attestation_submitted(
+                &env,
+                &item.business,
+                &item.period,
+                &item.merkle_root,
+                item.timestamp,
+                item.version,
+                total_fee,
+                &None::<BytesN<32>>,
+                item.expiry_timestamp,
+            );
+        }
+    }
 
     /// Returns true when an attestation exists and has passed its expiry timestamp.
     ///
@@ -360,6 +476,15 @@ impl AttestationContract {
             return Self::attestation_expired(&env, &data);
         }
         false
+    }
+
+    /// Helper to check if attestation data tuple is expired.
+    fn attestation_expired(env: &Env, data: &AttestationData) -> bool {
+        if let (_, _, _, _, _, Some(expiry_ts)) = data {
+            env.ledger().timestamp() >= *expiry_ts
+        } else {
+            false
+        }
     }
 
     /// Verifies attestation integrity and freshness for downstream consumers.
@@ -411,21 +536,6 @@ impl AttestationContract {
         Some((attestation, revocation))
     }
 
-    /// Verifies an attestation against the expected root and revocation status.
-    pub fn verify_attestation(
-        env: Env,
-        business: Address,
-        period: String,
-        merkle_root: BytesN<32>,
-    ) -> bool {
-        match Self::get_attestation(env.clone(), business.clone(), period.clone()) {
-            Some((stored_root, _, _, _, _, _)) => {
-                stored_root == merkle_root && !Self::is_revoked(env, business, period)
-            }
-            None => false,
-        }
-    }
-
     /// Batch-queries attestation and revocation state for the requested periods.
     pub fn get_business_attestations(
         env: Env,
@@ -439,21 +549,6 @@ impl AttestationContract {
             results.push_back((period, attestation, revocation));
         }
         results
-    }
-
-    /// Verify that an attestation exists and matches the provided merkle root.
-    /// This does NOT check expiry - use is_expired() separately for that.
-    pub fn verify_attestation(
-        env: Env,
-        business: Address,
-        period: String,
-        merkle_root: BytesN<32>,
-    ) -> bool {
-        if let Some((stored_root, _, _, _, _, _)) = Self::get_attestation(env, business, period) {
-            stored_root == merkle_root
-        } else {
-            false
-        }
     }
 
     pub fn revoke_attestation(
@@ -488,43 +583,56 @@ impl AttestationContract {
         is_net: bool,
         nonce: u64,
     ) {
-        access_control::require_admin(&env, &caller);
-        dispute::require_not_revoked_for_update(&env, &business, &period);
-        let key = DataKey::Attestation(business.clone(), period.clone());
-        let (_old_root, ts, old_ver, fee, proof_hash, expiry): AttestationData = env
-            .storage()
-            .instance()
-            .get(&key)
-            .expect("not found");
+        access_control::require_not_paused(&env);
+        business.require_auth();
+        replay_protection::verify_and_increment_nonce(&env, &business, NONCE_CHANNEL_BUSINESS, nonce);
+        rate_limit::check_rate_limit(&env, &business);
 
         let key = DataKey::Attestation(business.clone(), period.clone());
         if env.storage().instance().has(&key) {
             panic!("attestation already exists for this business and period");
         }
+        Self::validate_expiry(&env, timestamp, None);
 
-        let fee_paid = dynamic_fees::collect_fee(&env, &business);
+        // Validate and store extended metadata
+        extended_metadata::validate_metadata(&env, &currency_code, is_net);
+        let metadata = extended_metadata::AttestationMetadata {
+            currency_code: currency_code.clone(),
+            is_net,
+        };
+
+        // Collect fees
+        let dynamic_fee = dynamic_fees::collect_fee(&env, &business);
+        let flat_fee = fees::collect_flat_fee(&env, &business);
+        let total_fee = dynamic_fee + flat_fee;
+
+        // Track volume for future discount calculations
         dynamic_fees::increment_business_count(&env, &business);
 
-        let proof_hash: Option<BytesN<32>> = None;
-        let expiry_timestamp: Option<u64> = None;
         let data = (
             merkle_root.clone(),
             timestamp,
             version,
-            fee_paid,
-            proof_hash.clone(),
-            expiry_timestamp,
+            total_fee,
+            None::<BytesN<32>>, // proof_hash
+            None::<u64>,        // expiry_timestamp - metadata submissions don't include expiry
         );
         env.storage().instance().set(&key, &data);
-        events::emit_attestation_migrated(
+
+        // Store extended metadata
+        extended_metadata::set_metadata(&env, &business, &period, &metadata);
+
+        // Emit event
+        events::emit_attestation_submitted(
             &env,
             &business,
             &period,
-            &old_root,
-            &new_merkle_root,
-            old_ver,
-            new_version,
-            &caller,
+            &merkle_root,
+            timestamp,
+            version,
+            total_fee,
+            &None::<BytesN<32>>,
+            None::<u64>,
         );
     }
 
@@ -550,28 +658,6 @@ impl AttestationContract {
         events::emit_unpaused(&env, &caller);
     }
 
-        // Keep status key in sync for pagination/filtering.
-        let status_key = (STATUS_KEY_TAG, business.clone(), period.clone());
-        env.storage().instance().set(&status_key, &STATUS_REVOKED);
-
-        events::emit_attestation_revoked(&env, &business, &period, &caller, &reason);
-    }
-
-    /// Migrate an attestation to a new version.
-    pub fn verify_attestation(env: Env, business: Address, period: String, merkle_root: BytesN<32>) -> bool {
-        if let Some((stored_root, _ts, _ver, _fee)) = Self::get_attestation(env.clone(), business, period) {
-            stored_root == merkle_root
-        } else {
-            false
-        }
-    }
-
-    /// Migrate an attestation to a new version.
-    ///
-    /// Only ADMIN role can migrate attestations. This updates the merkle root
-    /// and version while preserving the audit trail. The existing proof hash
-    /// is preserved — proof hashes cannot be modified without explicit migration.
-    pub fn migrate_attestation(
     // ── New: Multi-Period Attestation Methods ───────────────────────
 
     /// Submit a multi-period revenue attestation.
@@ -594,15 +680,6 @@ impl AttestationContract {
             panic!("start_period must be <= end_period");
         }
 
-        let key = DataKey::Attestation(business.clone(), period.clone());
-        let (old_merkle_root, timestamp, old_version, fee_paid, proof_hash, expiry_timestamp): (
-            BytesN<32>,
-            u64,
-            u32,
-            i128,
-            Option<BytesN<32>>,
-            Option<u64>,
-        ) = env
         let key = MultiPeriodKey::Ranges(business.clone());
         let mut ranges: Vec<AttestationRange> = env
             .storage()
@@ -628,20 +705,18 @@ impl AttestationContract {
             timestamp,
             version,
             fee_paid,
-            proof_hash,
-            expiry_timestamp,
-        );
-        env.storage().instance().set(&key, &data);
             revoked: false,
         });
 
         env.storage().instance().set(&key, &ranges);
 
-        // Create a topic tuple to categorize the event
-        let topics = (soroban_sdk::Symbol::new(&env, "attestation"), soroban_sdk::Symbol::new(&env, "multi_period_issued"), business.clone());
         // Publish the event with the range and root
+        let topics = (
+            soroban_sdk::Symbol::new(&env, "attestation"),
+            soroban_sdk::Symbol::new(&env, "multi_period_issued"),
+            business.clone(),
+        );
         env.events().publish(topics, (start_period, end_period, merkle_root));
-
     }
 
     
@@ -673,24 +748,6 @@ impl AttestationContract {
         let record: Option<(BytesN<32>, u64, u32, i128, Option<BytesN<32>>, Option<u64>)> =
             env.storage().instance().get(&key);
         record.and_then(|(_, _, _, _, ph, _)| ph)
-    }
-
-    /// Check if an attestation has expired.
-    ///
-    /// Returns `true` if:
-    /// - The attestation exists
-    /// - It has an expiry timestamp set
-    /// - Current ledger time >= expiry timestamp
-    ///
-    /// Returns `false` if attestation doesn't exist or has no expiry.
-    pub fn is_expired(env: Env, business: Address, period: String) -> bool {
-        if let Some((_root, _ts, _ver, _fee, _proof_hash, Some(expiry_ts))) =
-            Self::get_attestation(env.clone(), business, period)
-        {
-            env.ledger().timestamp() >= expiry_ts
-        } else {
-            false
-        }
     }
 
     pub fn get_attestation_for_period(
@@ -863,13 +920,14 @@ impl AttestationContract {
     ///
     /// # Returns
     /// Vector of tuples containing (period, attestation_data, revocation_info)
-    pub fn get_business_attestations(
     pub fn revoke_multi_period_attestation(
         env: Env,
+        caller: Address,
         business: Address,
         merkle_root: BytesN<32>,
     ) {
-        business.require_auth();
+        caller.require_auth();
+        access_control::require_admin(&env, &caller);
 
         let key = MultiPeriodKey::Ranges(business.clone());
         let ranges: Vec<AttestationRange> = env
@@ -894,6 +952,9 @@ impl AttestationContract {
             panic!("attestation root not found");
         }
 
+        env.storage().instance().set(&key, &updated_ranges);
+    }
+
     /// Return the current flat fee configuration, or None if not set.
     ///
     /// # Returns
@@ -906,7 +967,6 @@ impl AttestationContract {
     /// Calculate the fee a business would pay for its next attestation.
     pub fn get_fee_quote(env: Env, business: Address) -> i128 {
         dynamic_fees::calculate_fee(&env, &business)
-        env.storage().instance().set(&key, &updated_ranges);
     }
 
 
