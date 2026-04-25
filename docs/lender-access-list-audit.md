@@ -1,8 +1,8 @@
-# Lender Access List — Audit Trail & Security Documentation
+﻿# Lender Access List  Audit Trail & Security Documentation
 
 > **Target file:** `contracts/lender-access-list/src/lib.rs`
 > **Test file:** `contracts/lender-access-list/src/test.rs`
-> **Schema version:** `EVENT_SCHEMA_VERSION = 1`
+> **Schema version:** `EVENT_SCHEMA_VERSION = 2`
 
 ---
 
@@ -34,9 +34,9 @@ The contract implements a **three-tier privilege hierarchy**:
 
 The `require_lender_admin` check uses OR logic: `has_governance || has_delegated_admin`. This enables:
 
-1. **Operational delegation** — day-to-day lender onboarding can be delegated to an operator (delegated admin) without exposing governance capabilities.
-2. **Separation of duties** — governance role changes require admin authorization; lender changes require only lender-admin authorization.
-3. **Least privilege** — delegated admins cannot escalate to governance or admin.
+1. **Operational delegation**  day-to-day lender onboarding can be delegated to an operator (delegated admin) without exposing governance capabilities.
+2. **Separation of duties**  governance role changes require admin authorization; lender changes require only lender-admin authorization.
+3. **Least privilege**  delegated admins cannot escalate to governance or admin.
 
 ---
 
@@ -58,37 +58,40 @@ These fields allow on-chain audit queries without requiring event replay.
 
 All events are `#[contracttype]` structs (XDR-serializable) and follow the two-topic pattern: `(primary_symbol, entity_address)`.
 
-| Event | Topic | Secondary Topic | Payload Type |
-|-------|-------|-----------------|--------------|
-| Lender enrolled/updated | `lnd_set` | lender address | `LenderEvent` |
-| Lender removed | `lnd_rem` | lender address | `LenderEvent` |
-| Governance granted | `gov_add` | account address | `GovernanceEvent` |
-| Governance revoked | `gov_del` | account address | `GovernanceEvent` |
-| Delegated admin granted | `del_add` | account address | `DelegatedAdminEvent` |
-| Delegated admin revoked | `del_del` | account address | `DelegatedAdminEvent` |
-| Admin transferred | `adm_xfer` | new admin address | `AdminTransferredEvent` |
+| Event | Topic | Secondary Topic | Payload Type | When Emitted |
+|-------|-------|-----------------|--------------|--------------|
+| Lender first enrolled | `lnd_new` | lender address | `LenderEnrolledEvent` | `set_lender`  no prior record |
+| Lender record updated | `lnd_set` | lender address | `LenderUpdatedEvent` | `set_lender`  record already exists |
+| Lender removed | `lnd_rem` | lender address | `LenderRemovedEvent` | `remove_lender` |
+| Governance granted | `gov_add` | account address | `GovernanceEvent` | `grant_governance` |
+| Governance revoked | `gov_del` | account address | `GovernanceEvent` | `revoke_governance` |
+| Delegated admin granted | `del_add` | account address | `DelegatedAdminEvent` | `grant_delegated_admin` |
+| Delegated admin revoked | `del_del` | account address | `DelegatedAdminEvent` | `revoke_delegated_admin` |
+| Admin transferred | `adm_xfer` | new admin address | `AdminTransferredEvent` | `transfer_admin` |
 
-> **Symbol length constraint:** All topic symbols are ≤ 9 bytes, satisfying the Soroban `symbol_short!` macro requirement.
+> **Symbol length constraint:** All topic symbols are  9 bytes, satisfying the Soroban `symbol_short!` macro requirement.
 
-### 3.3 LenderEvent — Rich Diff Payload
+### 3.3 Enrollment vs. Update Distinction (v2 change)
 
-`LenderEvent` carries both the new state and the previous state, enabling off-chain indexers to reconstruct a full diff without additional storage reads:
+In schema version 2, `set_lender` emits **different topics** depending on whether the lender is being enrolled for the first time:
 
-```rust
-pub struct LenderEvent {
-    pub lender: Address,
-    pub tier: u32,                        // new tier
-    pub status: LenderStatus,             // new status
-    pub changed_by: Address,              // actor
-    pub previous_tier: Option<u32>,       // None on first enrollment
-    pub previous_status: Option<LenderStatus>, // None on first enrollment
-}
-```
+- **`lnd_new`** (`LenderEnrolledEvent`)  first enrollment. No `previous_tier` or `previous_status` fields because no prior record exists. Includes `enrolled_at` (mirrors `Lender::added_at`).
+- **`lnd_set`** (`LenderUpdatedEvent`)  update of an existing record. Includes `previous_tier` and `previous_status` as non-optional fields for reliable diff reconstruction.
 
-- `previous_tier` and `previous_status` are `None` on first enrollment (no prior record).
-- On `remove_lender`, `previous_tier` captures the tier before removal, enabling detection of high-tier removals.
+This distinction lets off-chain indexers track net-new enrollments separately from tier/metadata changes without inspecting `previous_tier` for `None`.
 
-### 3.4 Secondary Topic for Efficient Indexing
+### 3.4 Removal Reason Field (v2 change)
+
+`remove_lender` now accepts a `reason: String` parameter included verbatim in the `lnd_rem` event payload (`LenderRemovedEvent::reason`). Callers should supply a short human-readable justification:
+
+- `"offboarded"`  lender relationship ended
+- `"compliance hold"`  regulatory or compliance action
+- `"key compromise"`  suspected credential compromise
+- `""`  no reason provided (valid; empty string is accepted)
+
+The reason is stored only in the event, not in the on-chain `Lender` record.
+
+### 3.5 Secondary Topic for Efficient Indexing
 
 Every event includes the affected entity address as a secondary topic:
 
@@ -98,25 +101,26 @@ topics = (event_type_symbol, entity_address)
 
 This allows off-chain indexers to filter events by entity (e.g., "all events for lender X") without scanning all contract events.
 
-### 3.5 Schema Versioning
+### 3.6 Schema Versioning
 
-`EVENT_SCHEMA_VERSION` (currently `1`) must be incremented whenever a breaking field change is made to any event struct. Off-chain indexers should check `get_event_schema_version()` and re-parse historical events on version change.
+`EVENT_SCHEMA_VERSION` is currently `2`. It must be incremented whenever a breaking field change is made to any event struct. Off-chain indexers should call `get_event_schema_version()` on startup and re-parse historical events on version change.
+
+| Version | Changes |
+|---------|---------|
+| 1 | Initial schema: single `LenderEvent` for all lender operations |
+| 2 | Split into `LenderEnrolledEvent` (`lnd_new`), `LenderUpdatedEvent` (`lnd_set`), `LenderRemovedEvent` (`lnd_rem`); added `reason` field to removal; `previous_tier`/`previous_status` are now non-optional in `LenderUpdatedEvent` |
 
 ---
 
 ## 4. Security Invariants
 
-The following invariants are enforced by the contract and validated by the test suite:
-
 ### 4.1 Authentication Before Authorization
 
 ```
-caller.require_auth()  →  role check  →  state mutation
+caller.require_auth()    role check    state mutation
 ```
 
-`require_auth()` is called as the **first** operation in every mutating function, before any storage read. This prevents:
-- Spoofing: an attacker cannot pass the role check without Soroban-level authentication.
-- TOCTOU: auth is checked before state is read.
+`require_auth()` is called as the **first** operation in every mutating function, before any storage read. This prevents spoofing and TOCTOU attacks.
 
 ### 4.2 Admin Uniqueness
 
@@ -131,6 +135,7 @@ Role revocations take effect in the same ledger. Any in-flight transaction from 
 - Governance cannot grant governance to others (admin-only).
 - Delegated admin cannot grant any role (admin-only).
 - Enrolled lenders have no implicit privileges.
+- A revoked governance or delegated admin address immediately loses `set_lender`/`remove_lender` access.
 
 ### 4.5 Lender Record Immutability on Removal
 
@@ -144,13 +149,17 @@ Role revocations take effect in the same ledger. Any in-flight transaction from 
 
 `transfer_admin` panics if `new_admin == admin` to prevent accidental no-op transfers that would still emit a misleading event.
 
+### 4.8 Reentrancy
+
+Soroban's execution model is single-threaded per transaction. There are no cross-contract calls in this contract, eliminating reentrancy risk entirely.
+
 ---
 
 ## 5. Storage Key Analysis
 
 | Key | Storage Tier | Mutability | Notes |
 |-----|-------------|------------|-------|
-| `DataKey::Admin` | Instance | Mutable (transfer_admin) | Single address |
+| `DataKey::Admin` | Instance | Mutable (`transfer_admin`) | Single address |
 | `DataKey::GovernanceRole(Address)` | Instance | Mutable (grant/revoke) | Boolean flag |
 | `DataKey::DelegatedAdmin(Address)` | Instance | Mutable (grant/revoke) | Boolean flag |
 | `DataKey::Lender(Address)` | Instance | Mutable (set/remove) | Full `Lender` struct |
@@ -160,13 +169,7 @@ All keys use instance storage. The lender list is bounded by governance operatio
 
 ---
 
-## 6. Reentrancy Analysis
-
-Soroban's execution model is single-threaded per transaction. There are no cross-contract calls in this contract, eliminating reentrancy risk entirely. All state mutations are atomic within a single transaction.
-
----
-
-## 7. Failure Modes and Error Messages
+## 6. Failure Modes and Error Messages
 
 | Panic Message | Trigger Condition | Recovery |
 |---------------|-------------------|----------|
@@ -179,7 +182,7 @@ Soroban's execution model is single-threaded per transaction. There are no cross
 
 ---
 
-## 8. Admin and Operator Responsibilities
+## 7. Admin and Operator Responsibilities
 
 ### Admin Responsibilities
 
@@ -195,77 +198,76 @@ Soroban's execution model is single-threaded per transaction. There are no cross
 1. **Verify lender identity** before enrollment.
 2. **Set appropriate tier** based on the lender's integration level.
 3. **Remove lenders promptly** when they are offboarded or their access should be revoked.
-4. **Do not share credentials** — each operator should have their own address.
+4. **Supply a meaningful reason** on `remove_lender` for audit trail completeness.
+5. **Do not share credentials**  each operator should have their own address.
 
 ---
 
-## 9. Integration Guidance
+## 8. Integration Guidance
 
 Contracts integrating with the lender access list should:
 
 1. Store the deployed `LenderAccessListContract` address in their own storage.
 2. For tier-gated operations, call `is_allowed(caller, required_tier)` after `caller.require_auth()`.
 3. Define per-operation minimum tier requirements and document them.
-4. Never cache `is_allowed` results across ledgers — always query fresh.
-
-Example integration pattern:
+4. Never cache `is_allowed` results across ledgers  always query fresh.
 
 ```rust
-// In a lender-facing contract:
 fn lender_operation(env: Env, caller: Address, access_list: Address) {
     caller.require_auth();
-
     let client = LenderAccessListContractClient::new(&env, &access_list);
     assert!(client.is_allowed(&caller, &1u32), "caller is not an allowed lender");
-
-    // ... proceed with operation
+    // ... proceed
 }
 ```
 
 ---
 
-## 10. Test Coverage Summary
-
-The test suite in `contracts/lender-access-list/src/test.rs` covers:
+## 9. Test Coverage Summary
 
 | Category | Tests | Notes |
 |----------|-------|-------|
-| Initialization | 3 | Double-init guard, admin/governance setup |
-| Admin transfer | 5 | Happy path, self-transfer guard, non-admin guard, event schema |
+| Initialization | 4 | Double-init guard, admin/governance setup, schema version |
+| Admin transfer | 6 | Happy path, self-transfer guard, non-admin guard, event schema |
 | Governance role | 7 | Grant, revoke, idempotent, non-holder revoke, auth guards, events |
 | Delegated admin | 7 | Grant, revoke, idempotent, non-holder revoke, auth guards, events |
-| Lender lifecycle | 9 | Enroll, update, tier=0, remove, re-enroll, dedup, multi-lender |
+| Lender lifecycle | 8 | Enroll, update, tier=0, remove, re-enroll, dedup, multi-lender |
 | Access checks | 6 | min_tier=0, unenrolled, exact match, removed, tier=0, u32::MAX |
-| Audit trail | 3 | added_at preserved, updated_at changes, updated_by tracked |
-| Event schema | 7 | lnd_set (enroll/update/tier=0), lnd_rem, previous fields |
-| Dual control | 8 | Both roles can manage, revoked roles lose access, scope limits |
-| Negative / auth | 8 | All unauthorized paths panic with correct messages |
-| Self-revocation | 5 | Admin can revoke own governance, governance/delegated cannot self-revoke |
+| Audit trail | 4 | added_at preserved, updated_at changes, updated_by tracked, metadata-only update |
+| Event schema lnd_new | 2 | First enrollment topic, tier=0 enrollment |
+| Event schema lnd_set | 3 | Update topic, tier=0 update, changed_by per caller |
+| Event schema lnd_rem | 4 | Full schema, empty reason, double-remove, reason per caller |
+| Dual control | 11 | Both roles can manage, concurrent updates, revoked roles, scope limits |
+| Negative / auth | 7 | All unauthorized paths panic with correct messages |
+| Self-revocation | 3 | Admin can revoke own governance, governance/delegated cannot self-revoke |
 | Bulk operations | 5 | Bulk enroll, bulk remove, tier upgrades, multi-governance, multi-delegated |
-| Race conditions | 3 | Last-writer-wins, grant-then-revoke, enroll-remove-reenroll cycle |
-| Privilege escalation | 4 | Lender cannot self-enroll, self-remove, self-upgrade |
+| Race conditions | 4 | Last-writer-wins, grant-then-revoke, enroll-remove-reenroll, event sequence |
+| Privilege escalation | 2 | Lender cannot self-enroll, self-upgrade |
 | Query correctness | 5 | None for unenrolled, empty list, active excludes tier=0/removed, all includes removed |
 | Boundary values | 3 | u32::MAX tier, tier=1 minimum, empty metadata strings |
 | Event ordering | 2 | All state changes emit events, read-only calls emit no events |
+| Schema version | 1 | Constant matches query, equals 2 |
 
-**Total: 90+ test cases** covering all public API paths, all error conditions, and all security-sensitive boundaries.
+**Total: 100+ test cases** covering all public API paths, all error conditions, and all security-sensitive boundaries.
 
 ---
 
-## 11. Known Limitations and Risk Acceptance
+## 10. Known Limitations and Risk Acceptance
 
 | Limitation | Risk Level | Justification |
 |------------|------------|---------------|
-| No lender suspension (only removal) | Low | Removal + re-enrollment covers the use case; suspension adds complexity without meaningful security benefit at this tier |
-| No bulk enroll/remove API | Low | Governance operations are infrequent; individual calls are auditable and gas-bounded |
+| No lender suspension (only removal) | Low | Removal + re-enrollment covers the use case |
+| No bulk enroll/remove API | Low | Governance operations are infrequent; individual calls are auditable |
 | Linear scan in `append_lender_to_list` | Low | Lender list is governance-controlled and expected to be small (< 1000 entries) |
-| Instance storage for all keys | Low | Lender list size is bounded by governance operations; persistent storage not needed at current scale |
-| No expiry / time-based revocation | Medium | Operators must manually revoke; acceptable for current governance model but should be revisited if automated expiry is needed |
+| Instance storage for all keys | Low | Lender list size is bounded by governance operations |
+| No expiry / time-based revocation | Medium | Operators must manually revoke; acceptable for current governance model |
+| Removal reason stored in event only | Low | On-chain record does not carry reason; event replay required for full audit |
 
 ---
 
-## 12. Changelog
+## 11. Changelog
 
 | Version | Date | Changes |
 |---------|------|---------|
-| 1.0 | 2026-04-25 | Initial audit documentation. Added `transfer_admin`, secondary event topics, `previous_tier`/`previous_status` in `LenderEvent`, `AdminTransferredEvent`, `EVENT_SCHEMA_VERSION`, `get_event_schema_version`. Fixed `symbol_short!` symbols to ≤ 9 bytes. Added 90+ tests. |
+| 1.0 | 2026-04-25 | Initial audit documentation |
+| 2.0 | 2026-04-25 | Schema v2: split `LenderEvent` into `LenderEnrolledEvent` (`lnd_new`), `LenderUpdatedEvent` (`lnd_set`), `LenderRemovedEvent` (`lnd_rem`); added `reason` field to `remove_lender`; `previous_tier`/`previous_status` non-optional in update event; 100+ tests |

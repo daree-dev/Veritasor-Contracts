@@ -37,6 +37,19 @@
 //! The `Lender` record itself stores `added_at`, `updated_at`, and `updated_by`
 //! for on-chain audit queries without requiring event replay.
 //!
+//! ### Enrollment vs. Update distinction
+//!
+//! `set_lender` emits **`lnd_new`** on first enrollment and **`lnd_set`** on
+//! subsequent updates. This lets off-chain indexers distinguish net-new
+//! enrollments from tier/metadata changes without inspecting `previous_tier`.
+//!
+//! ### Removal reason
+//!
+//! `remove_lender` accepts an optional `reason` string that is included in the
+//! `lnd_rem` event payload. Callers should supply a short human-readable
+//! justification (e.g. `"offboarded"`, `"compliance hold"`). Pass an empty
+//! string when no reason is available.
+//!
 //! ## Security Invariants
 //!
 //! 1. `require_auth()` is called on every mutating entry point before any
@@ -70,7 +83,14 @@ mod test;
 /// Increment this constant whenever a breaking field change is made to *any*
 /// event struct in this module so that off-chain indexers can detect and
 /// handle schema changes.
-pub const EVENT_SCHEMA_VERSION: u32 = 1;
+///
+/// | Version | Change |
+/// |---------|--------|
+/// | 1       | Initial schema |
+/// | 2       | Added `lnd_new` topic for first-enrollment events; added `reason`
+/// |         | field to `LenderRemovedEvent`; split `LenderEvent` into
+/// |         | `LenderEnrolledEvent`, `LenderUpdatedEvent`, `LenderRemovedEvent` |
+pub const EVENT_SCHEMA_VERSION: u32 = 2;
 
 // ════════════════════════════════════════════════════════════════════
 //  Storage Types
@@ -148,7 +168,12 @@ pub struct Lender {
 //  Naming convention: <entity>_<action> abbreviated to fit.
 // ════════════════════════════════════════════════════════════════════
 
-/// Topic: lender record created or updated via `set_lender`.
+/// Topic: lender first enrolled via `set_lender` (no prior record).
+///
+/// Distinct from `lnd_set` so indexers can track net-new enrollments
+/// without inspecting `previous_tier`.
+pub const TOPIC_LENDER_NEW: Symbol = symbol_short!("lnd_new");
+/// Topic: existing lender record updated via `set_lender`.
 pub const TOPIC_LENDER_SET: Symbol = symbol_short!("lnd_set");
 /// Topic: lender removed via `remove_lender`.
 pub const TOPIC_LENDER_REM: Symbol = symbol_short!("lnd_rem");
@@ -173,14 +198,34 @@ pub const TOPIC_ADM_XFER: Symbol = symbol_short!("adm_xfer");
 //    4. Field order is stable; new optional fields go at the END only.
 // ════════════════════════════════════════════════════════════════════
 
-/// Payload for `lnd_set` and `lnd_rem` events.
+/// Payload for `lnd_new` events (first enrollment via `set_lender`).
 ///
-/// Emitted on every `set_lender` and `remove_lender` call.
-/// `previous_tier` and `previous_status` are `None` when the lender is
-/// being enrolled for the first time (no prior record exists).
+/// Emitted when a lender address is enrolled for the first time. There is
+/// no `previous_tier` or `previous_status` because no prior record exists.
+/// Use `lnd_set` events for subsequent updates.
 #[contracttype]
 #[derive(Clone, Debug)]
-pub struct LenderEvent {
+pub struct LenderEnrolledEvent {
+    /// The lender address being enrolled.
+    pub lender: Address,
+    /// Initial tier value.
+    pub tier: u32,
+    /// Initial status (Active when tier > 0, Removed when tier == 0).
+    pub status: LenderStatus,
+    /// Address that authorized the enrollment.
+    pub changed_by: Address,
+    /// Ledger sequence at enrollment time (mirrors `Lender::added_at`).
+    pub enrolled_at: u32,
+}
+
+/// Payload for `lnd_set` events (update of an existing lender record).
+///
+/// Emitted on every `set_lender` call where the lender was already enrolled.
+/// Both new and previous state are included so off-chain indexers can
+/// reconstruct a full diff without additional storage reads.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct LenderUpdatedEvent {
     /// The lender address affected.
     pub lender: Address,
     /// New tier value after the operation.
@@ -189,10 +234,31 @@ pub struct LenderEvent {
     pub status: LenderStatus,
     /// Address that authorized the change.
     pub changed_by: Address,
-    /// Tier value before the operation (`None` on first enrollment).
-    pub previous_tier: Option<u32>,
-    /// Status before the operation (`None` on first enrollment).
-    pub previous_status: Option<LenderStatus>,
+    /// Tier value before the operation.
+    pub previous_tier: u32,
+    /// Status before the operation.
+    pub previous_status: LenderStatus,
+}
+
+/// Payload for `lnd_rem` events (removal via `remove_lender`).
+///
+/// Emitted on every `remove_lender` call. Includes the tier and status
+/// before removal so high-tier removals are detectable in the event stream.
+/// The optional `reason` field carries a human-readable justification
+/// supplied by the caller.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct LenderRemovedEvent {
+    /// The lender address removed.
+    pub lender: Address,
+    /// Address that authorized the removal.
+    pub changed_by: Address,
+    /// Tier value before removal.
+    pub previous_tier: u32,
+    /// Status before removal.
+    pub previous_status: LenderStatus,
+    /// Human-readable removal reason (empty string if not provided).
+    pub reason: String,
 }
 
 /// Payload for `gov_add` and `gov_del` events.
@@ -425,9 +491,11 @@ impl LenderAccessListContract {
 
     /// Add or update a lender record.
     ///
-    /// On first enrollment the lender is appended to the global lender list.
-    /// On subsequent calls the existing record is updated in place; `added_at`
-    /// is preserved.
+    /// **First enrollment** emits a `lnd_new` event (`LenderEnrolledEvent`).
+    /// The lender is appended to the global lender list.
+    ///
+    /// **Subsequent calls** emit a `lnd_set` event (`LenderUpdatedEvent`).
+    /// The existing record is updated in place; `added_at` is preserved.
     ///
     /// Setting `tier = 0` is equivalent to calling `remove_lender`: the
     /// record is written with `status = Removed` and `tier = 0`.
@@ -456,51 +524,65 @@ impl LenderAccessListContract {
 
         let now = env.ledger().sequence();
         let key = DataKey::Lender(lender.clone());
-
-        let (added_at, previous_tier, previous_status, new_status) =
-            if let Some(existing) = env.storage().instance().get::<_, Lender>(&key) {
-                let prev_tier = existing.tier;
-                let prev_status = existing.status.clone();
-                let new_status = if tier == 0 {
-                    LenderStatus::Removed
-                } else {
-                    LenderStatus::Active
-                };
-                (existing.added_at, Some(prev_tier), Some(prev_status), new_status)
-            } else {
-                // First enrollment: append to global list
-                Self::append_lender_to_list(&env, &lender);
-                let new_status = if tier == 0 {
-                    LenderStatus::Removed
-                } else {
-                    LenderStatus::Active
-                };
-                (now, None, None, new_status)
-            };
-
-        let record = Lender {
-            address: lender.clone(),
-            tier,
-            status: new_status.clone(),
-            metadata,
-            added_at,
-            updated_at: now,
-            updated_by: caller.clone(),
+        let new_status = if tier == 0 {
+            LenderStatus::Removed
+        } else {
+            LenderStatus::Active
         };
 
-        env.storage().instance().set(&key, &record);
+        if let Some(existing) = env.storage().instance().get::<_, Lender>(&key) {
+            // ── Update path ──────────────────────────────────────────
+            let previous_tier = existing.tier;
+            let previous_status = existing.status.clone();
 
-        env.events().publish(
-            (TOPIC_LENDER_SET, lender.clone()),
-            LenderEvent {
-                lender,
+            let record = Lender {
+                address: lender.clone(),
                 tier,
-                status: new_status,
-                changed_by: caller,
-                previous_tier,
-                previous_status,
-            },
-        );
+                status: new_status.clone(),
+                metadata,
+                added_at: existing.added_at,
+                updated_at: now,
+                updated_by: caller.clone(),
+            };
+            env.storage().instance().set(&key, &record);
+
+            env.events().publish(
+                (TOPIC_LENDER_SET, lender.clone()),
+                LenderUpdatedEvent {
+                    lender,
+                    tier,
+                    status: new_status,
+                    changed_by: caller,
+                    previous_tier,
+                    previous_status,
+                },
+            );
+        } else {
+            // ── First-enrollment path ────────────────────────────────
+            Self::append_lender_to_list(&env, &lender);
+
+            let record = Lender {
+                address: lender.clone(),
+                tier,
+                status: new_status.clone(),
+                metadata,
+                added_at: now,
+                updated_at: now,
+                updated_by: caller.clone(),
+            };
+            env.storage().instance().set(&key, &record);
+
+            env.events().publish(
+                (TOPIC_LENDER_NEW, lender.clone()),
+                LenderEnrolledEvent {
+                    lender,
+                    tier,
+                    status: new_status,
+                    changed_by: caller,
+                    enrolled_at: now,
+                },
+            );
+        }
     }
 
     /// Remove a lender from the allowlist.
@@ -509,6 +591,11 @@ impl LenderAccessListContract {
     /// storage for audit purposes; the lender address remains in the global
     /// list returned by `get_all_lenders()` but is excluded from
     /// `get_active_lenders()`.
+    ///
+    /// The `reason` parameter is included verbatim in the `lnd_rem` event
+    /// payload. Supply a short human-readable justification (e.g.
+    /// `"offboarded"`, `"compliance hold"`). Pass an empty string when no
+    /// reason is available.
     ///
     /// # Authorization
     ///
@@ -519,7 +606,7 @@ impl LenderAccessListContract {
     ///
     /// - If `caller` lacks lender admin privileges.
     /// - If the lender record does not exist (`"lender not found"`).
-    pub fn remove_lender(env: Env, caller: Address, lender: Address) {
+    pub fn remove_lender(env: Env, caller: Address, lender: Address, reason: String) {
         Self::require_lender_admin(&env, &caller);
 
         let key = DataKey::Lender(lender.clone());
@@ -541,13 +628,12 @@ impl LenderAccessListContract {
 
         env.events().publish(
             (TOPIC_LENDER_REM, lender.clone()),
-            LenderEvent {
+            LenderRemovedEvent {
                 lender,
-                tier: 0,
-                status: LenderStatus::Removed,
                 changed_by: caller,
-                previous_tier: Some(previous_tier),
-                previous_status: Some(previous_status),
+                previous_tier,
+                previous_status,
+                reason,
             },
         );
     }
