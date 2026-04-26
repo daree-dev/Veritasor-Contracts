@@ -197,21 +197,21 @@ impl AttestationContract {
 
     /// Configure or update the flat fee mechanism.
     ///
-    /// * `token`    – Token contract address for fee payment.
-    /// * `treasury` – Address that receives protocol fees.
-    /// * `amount`   – Flat fee amount in token smallest units.
-    /// * `enabled`  – Master switch — when `false`, flat fees are disabled.
+    /// * `token`     – Token contract address for fee payment.
+    /// * `collector` – Address that receives protocol fees.
+    /// * `amount`    – Flat fee amount in token smallest units.
+    /// * `enabled`   – Master switch — when `false`, flat fees are disabled.
     ///
     /// # Arguments
     ///
     /// * `token` - The address of the token to be used for fees.
-    /// * `treasury` - The address that will receive the fees.
+    /// * `collector` - The address that will receive the fees.
     /// * `amount` - The flat fee amount.
     /// * `enabled` - Whether the fee is enabled.
     pub fn configure_flat_fee(
         env: Env,
         token: Address,
-        treasury: Address,
+        collector: Address,
         amount: i128,
         enabled: bool,
     ) {
@@ -219,14 +219,30 @@ impl AttestationContract {
         assert!(amount >= 0, "flat fee amount must be non-negative");
         let config = FlatFeeConfig {
             token,
-            treasury,
+            collector,
             amount,
             enabled,
         };
         fees::set_flat_fee_config(&env, &config);
-        
-        // We could emit a specific event, but the requirement is just to integrate and document.
+
+        let admin = dynamic_fees::get_admin(&env);
+        events::emit_flat_fee_config_changed(
+            &env,
+            &config.token,
+            &config.collector,
+            config.amount,
+            config.enabled,
+            &admin,
+        );
     }
+
+
+    /// Set the Protocol DAO contract address for flat fee overrides.
+    pub fn set_flat_fee_dao(env: Env, dao: Address) {
+        dynamic_fees::require_admin(&env);
+        fees::set_dao(&env, &dao);
+    }
+
 
     // ── Attestor staking integration ───────────────────────────────
 
@@ -310,12 +326,10 @@ impl AttestationContract {
             merkle_root.clone(),
             timestamp,
             version,
-            fee_paid,
+            total_fee,
             proof_hash.clone(),
             expiry_timestamp,
-            false, // not revoked
         );
-        let data = (merkle_root.clone(), timestamp, version, total_fee);
         env.storage().instance().set(&key, &data);
 
         // Emit event
@@ -326,11 +340,11 @@ impl AttestationContract {
             &merkle_root,
             timestamp,
             version,
-            fee_paid,
+            total_fee,
             &proof_hash,
             expiry_timestamp,
-            total_fee,
         );
+
 
         rate_limit::record_submission(&env, &business);
     }
@@ -502,7 +516,7 @@ impl AttestationContract {
         let dynamic_fee = dynamic_fees::collect_fee(&env, &business);
         let flat_fee = fees::collect_flat_fee(&env, &business);
         let total_fee = dynamic_fee + flat_fee;
-
+        
         dynamic_fees::increment_business_count(&env, &business);
 
         let data = (
@@ -510,29 +524,15 @@ impl AttestationContract {
             timestamp,
             version,
             total_fee,
-            None::<BytesN<32>>,
-            None::<u64>,
+            proof_hash.clone(),
+            expiry_timestamp,
         );
         env.storage().instance().set(&key, &data);
-
-        let metadata = extended_metadata::validate_metadata(&env, &currency_code, is_net);
-        extended_metadata::set_metadata(&env, &business, &period, &metadata);
-
-        events::emit_attestation_submitted(
-            &env,
-            &business,
-            &period,
-            &merkle_root,
-            timestamp,
-            version,
-            total_fee,
-            &None,
-            None,
-            total_fee,
-        );
-
-        rate_limit::record_submission(&env, &business);
+        
+        // Extended metadata
+        extended_metadata::set_metadata(&env, &business, &period, &currency_code, is_net);
     }
+
 
     /// Pauses state-changing administrative flows.
     pub fn pause(env: Env, caller: Address) {
@@ -900,14 +900,54 @@ impl AttestationContract {
             panic!("attestation root not found");
         }
 
+    /// Calculate a canonical commitment hash for an attestation.
+    ///
+    /// This commitment binds the business, period, merkle root, and version
+    /// into a single SHA-256 hash. Off-chain systems should use this hash
+    /// to ensure that a proof bundle is uniquely tied to a specific on-chain
+    /// attestation record, preventing forgery or reuse across periods.
+    ///
+    /// # Arguments
+    ///
+    /// * `business`    – The business address.
+    /// * `period`      – The attestation period string.
+    /// * `merkle_root` – The 32-byte Merkle root hash.
+    /// * `version`     – The schema version.
+    pub fn compute_commitment(
+        env: Env,
+        business: Address,
+        period: String,
+        merkle_root: BytesN<32>,
+        version: u32,
+    ) -> BytesN<32> {
+        let mut buf = soroban_sdk::Bytes::new(&env);
+        
+        // Canonical encoding: [Business XDR] | [Period XDR] | [Root Bytes] | [Version BE]
+        buf.append(&business.to_xdr(&env));
+        buf.append(&period.to_xdr(&env));
+        buf.append(&merkle_root.to_xdr(&env));
+        
+        // Use big-endian for version to ensure stability across architectures
+        let mut ver_buf = [0u8; 4];
+        for (i, byte) in version.to_be_bytes().iter().enumerate() {
+            ver_buf[i] = *byte;
+        }
+        buf.append(&soroban_sdk::Bytes::from_array(&env, &ver_buf));
+
+        env.crypto().sha256(&buf)
+    }
+
     /// Return the current flat fee configuration, or None if not set.
-    ///
-    /// # Returns
-    ///
-    /// * `Option<FlatFeeConfig>` - The current flat fee configuration.
+
     pub fn get_flat_fee_config(env: Env) -> Option<FlatFeeConfig> {
         fees::get_flat_fee_config(&env)
     }
+
+    /// Return the effective flat fee configuration (including DAO overrides).
+    pub fn get_effective_flat_fee_config(env: Env) -> Option<FlatFeeConfig> {
+        fees::get_effective_flat_fee_config(&env)
+    }
+
 
     /// Calculate the fee a business would pay for its next attestation.
     pub fn get_fee_quote(env: Env, business: Address) -> i128 {
