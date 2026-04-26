@@ -240,6 +240,7 @@ impl RevenueCurveContract {
         // Negative min_revenue is intentionally allowed: a business may have net-loss
         // periods and still qualify for a tier discount.
         let mut prev_revenue: Option<i128> = None;
+        let mut prev_discount: u32 = 0;
         for tier in tiers.iter() {
             if let Some(prev) = prev_revenue {
                 assert!(
@@ -247,8 +248,13 @@ impl RevenueCurveContract {
                     "tiers must be sorted by min_revenue ascending"
                 );
             }
-            assert!(tier.discount_bps <= 10_000, "discount cannot exceed 100%");
+            assert!(tier.discount_bps <= 10000, "discount cannot exceed 100%");
+            assert!(
+                tier.discount_bps >= prev_discount,
+                "tier discounts must be non-decreasing (monotonic)"
+            );
             prev_revenue = Some(tier.min_revenue);
+            prev_discount = tier.discount_bps;
         }
 
         env.storage().instance().set(&DataKey::RevenueTiers, &tiers);
