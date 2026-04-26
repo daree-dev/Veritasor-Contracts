@@ -222,7 +222,7 @@ impl AttestationContract {
 
         dynamic_fees::increment_business_count(&env, &business);
 
-        let data: AttestationData = (
+        let data = (
             merkle_root.clone(),
             timestamp,
             version,
