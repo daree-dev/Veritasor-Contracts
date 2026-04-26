@@ -342,7 +342,9 @@ impl AttestationContract {
         new_version: u32,
         _nonce: u64,
     ) {
+        // Authorization + precondition checks (pause, existence, idempotency, role).
         dispute::require_revocation_authorized(&env, &caller, &business, &period);
+
         let revoked_at = env.ledger().timestamp();
         let revocation = (caller.clone(), revoked_at, reason.clone());
         dispute::store_attestation_revocation(&env, &business, &period, &revocation);
