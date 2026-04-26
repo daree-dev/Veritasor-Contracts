@@ -132,15 +132,23 @@ pub fn create_proposal(env: &Env, proposer: &Address, action: ProposalAction) ->
         .instance()
         .set(&MultisigKey::NextProposalId, &(id + 1));
 
+    let created_at = env.ledger().sequence();
     let proposal = Proposal {
         id,
         action,
         proposer: proposer.clone(),
         status: ProposalStatus::Pending,
+        created_at,
     };
     env.storage()
         .instance()
         .set(&MultisigKey::Proposal(id), &proposal);
+
+    // Set expiry
+    let expiry = created_at + DEFAULT_PROPOSAL_EXPIRY;
+    env.storage()
+        .instance()
+        .set(&MultisigKey::ProposalExpiry(id), &expiry);
 
     let mut approvals = Vec::new(env);
     approvals.push_back(proposer.clone());
@@ -161,9 +169,23 @@ pub fn get_approvals(env: &Env, id: u64) -> Vec<Address> {
         .unwrap_or_else(|| Vec::new(env))
 }
 
+pub fn is_proposal_expired(env: &Env, id: u64) -> bool {
+    if let Some(expiry) = env.storage().instance().get::<_, u32>(&MultisigKey::ProposalExpiry(id)) {
+        return env.ledger().sequence() > expiry;
+    }
+    false
+}
+
 pub fn approve_proposal(env: &Env, approver: &Address, id: u64) {
     approver.require_auth();
-    let proposal = get_proposal(env, id).expect("proposal not found");
+    let mut proposal = get_proposal(env, id).expect("proposal not found");
+    
+    if is_proposal_expired(env, id) {
+        proposal.status = ProposalStatus::Expired;
+        env.storage().instance().set(&MultisigKey::Proposal(id), &proposal);
+        panic!("proposal has expired");
+    }
+
     assert!(
         proposal.status == ProposalStatus::Pending,
         "proposal is not pending"
@@ -202,6 +224,13 @@ pub fn get_approval_count(env: &Env, id: u64) -> u32 {
 
 pub fn mark_executed(env: &Env, id: u64) {
     let mut proposal = get_proposal(env, id).expect("proposal not found");
+    
+    if is_proposal_expired(env, id) {
+        proposal.status = ProposalStatus::Expired;
+        env.storage().instance().set(&MultisigKey::Proposal(id), &proposal);
+        panic!("proposal has expired");
+    }
+
     assert!(
         proposal.status == ProposalStatus::Pending,
         "proposal is not pending"
