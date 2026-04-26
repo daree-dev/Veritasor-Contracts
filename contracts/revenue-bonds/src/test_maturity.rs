@@ -42,6 +42,22 @@ fn test_parse_period_valid() {
 }
 
 #[test]
+fn test_parse_period_january() {
+    let env = Env::default();
+    let p = String::from_str(&env, "2026-01");
+    let months = parse_period(&env, p);
+    assert_eq!(months, 2026u64 * 12);
+}
+
+#[test]
+fn test_parse_period_december() {
+    let env = Env::default();
+    let p = String::from_str(&env, "2026-12");
+    let months = parse_period(&env, p);
+    assert_eq!(months, 2026u64 * 12 + 11);
+}
+
+#[test]
 #[should_panic(expected = "invalid period length")]
 fn test_parse_period_invalid_length() {
     let env = Env::default();
@@ -77,7 +93,46 @@ fn make_bond(env: &Env, issue_period: &str, maturity_periods: u32) -> Bond {
 }
 
 #[test]
-fn test_is_within_maturity_valid() {
+#[should_panic(expected = "invalid month")]
+fn test_parse_period_month_zero() {
+    let env = Env::default();
+    let p = String::from_str(&env, "2026-00");
+    parse_period(&env, p);
+}
+
+#[test]
+#[should_panic(expected = "invalid month")]
+fn test_parse_period_month_thirteen() {
+    let env = Env::default();
+    let p = String::from_str(&env, "2026-13");
+    parse_period(&env, p);
+}
+
+// ── unit: is_period_within_maturity ──────────────────────────────────────────
+
+fn make_bond(env: &Env, issue_period: &str, maturity_periods: u32) -> Bond {
+    let issuer = Address::generate(env);
+    let attestation_contract = Address::generate(env);
+    let token = Address::generate(env);
+    Bond {
+        id: 0,
+        issuer,
+        face_value: 1_000_000,
+        structure: BondStructure::Fixed,
+        revenue_share_bps: 0,
+        min_payment_per_period: 100_000,
+        max_payment_per_period: 100_000,
+        maturity_periods,
+        attestation_contract,
+        token,
+        status: BondStatus::Active,
+        issued_at: 0,
+        issue_period: String::from_str(env, issue_period),
+    }
+}
+
+#[test]
+fn test_is_within_maturity_first_period() {
     let env = Env::default();
     let bond = make_bond(&env, "2026-01", 12);
     assert!(is_period_within_maturity(&env, &bond, String::from_str(&env, "2026-12")));
@@ -91,6 +146,24 @@ fn test_is_within_maturity_expired() {
 }
 
 // ─── Maturity enforcement via contract ───────────────────────────────────────
+
+#[test]
+fn test_is_within_maturity_before_issue() {
+    let env = Env::default();
+    let bond = make_bond(&env, "2026-03", 12);
+    // period before issue_period is outside the window
+    assert!(!is_period_within_maturity(&env, &bond, String::from_str(&env, "2026-01")));
+}
+
+#[test]
+fn test_is_within_maturity_single_period_bond() {
+    let env = Env::default();
+    let bond = make_bond(&env, "2026-06", 1);
+    assert!(is_period_within_maturity(&env, &bond, String::from_str(&env, "2026-06")));
+    assert!(!is_period_within_maturity(&env, &bond, String::from_str(&env, "2026-07")));
+}
+
+// ── integration: redeem maturity gate ────────────────────────────────────────
 
 #[test]
 fn test_redeem_within_maturity() {
